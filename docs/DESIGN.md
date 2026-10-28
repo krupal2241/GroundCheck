@@ -142,3 +142,71 @@ The raw API is two URLs:
 client, in the download tests) with fakes that return canned responses. That's why CI
 never contacts SEC. The submissions fixture in `tests/fixtures/edgar/` is synthetic: a
 made-up company with the same JSON structure.
+
+## HTML to text (`parsing/html_text.py`), Day 3
+
+**What:** `html_to_text(html)` turns a filing's HTML into plain text. Each paragraph,
+heading or `<div>` becomes one line, with a blank line between blocks. Each data table
+becomes a `[TABLE]`…`[/TABLE]` block with one line per row and cells joined by ` | `.
+`table_rows(table)` exposes the cleaned rows, so the chunker can later split tables on
+row boundaries and repeat the header row.
+
+**Why walk the tree ourselves instead of `soup.get_text()`:** `get_text()` either glues
+everything together or puts a separator between *every* tag. That splits
+`<span>Net </span><span>sales</span>` wrongly, and it can't tell a paragraph break from
+an inline tag. The walker knows which tags are blocks (`div`, `p`, `br`, `li`, ...)
+and which are inline (`span`, `font`, `b`, `ix:*`). Source-code line breaks inside a
+paragraph are just whitespace, so all whitespace inside a block is collapsed.
+
+**Hidden content:** inline-XBRL filings put a machine-readable copy of key facts in an
+`ix:header` inside `display:none`. If we kept it, retrieval would match text no reader
+ever sees. Anything with `display:none` or `hidden` is dropped, along with `head`,
+`script` and `style`. `ix:nonFraction` and similar tags are only unwrapped, because
+they wrap the visible numbers.
+
+**Tables:** filers split values across cells for alignment: `$` | `1,234`, or `(1,234`
+| `)`, or `45.6` | `%`. Each row is cleaned in three steps:
+1. *Colspan expansion:* each cell records which grid columns it covers, so rows line
+   up even when some cells span several columns.
+2. *Merging:* a cell holding only `$` or `(` joins the next value, and a cell holding
+   only `)` or `%` joins the previous one. That gives `$(1,234)`, `45.6%`, and `(1,234)`
+   kept exactly as printed. We don't convert it to `-1234`: the claim checker needs
+   the filing's own text, and the parenthesis convention is part of it.
+3. *Column cleanup:* a column is kept only if some ordinary (colspan=1) cell has text
+   in it. A heading that spans columns (e.g. `2025` over the `$` column and the value
+   column) moves to the first kept column under it, so it lines up with its numbers.
+   Empty cells in kept columns stay as empty strings, so a missing value doesn't shift
+   the rest of the row left.
+
+*Alternatives:* `pandas.read_html` flattens tables too, but it doesn't merge `$`/`)`/`%`
+cells. It also pulls in pandas and gives no control over colspan placement. A
+per-row "drop empty cells" rule is simpler, but one blank cell then shifts every
+later value into the wrong year's column.
+
+**Layout tables:** older filings use tables for layout too. A table left with one
+column after cleanup (a boxed note), or two columns where the first holds only bullets
+(a bulleted list), comes out as prose, not `[TABLE]`. That way the chunker doesn't
+treat a risk factor as tabular data. A table nested inside a cell is flattened into
+that cell's text.
+
+**Parser choice:** BeautifulSoup with lxml's HTML parser. It's fast, and it tolerates
+the unclosed tags in older filings. Inline-XBRL files are XHTML and begin with
+`<?xml ...?>`, so bs4 warns that an XML parser would be "more reliable". We silence
+that warning on purpose: an XML parser rejects the first malformed tag, and one parser
+for every filing means one set of rules. `bytes` input lets bs4 pick the encoding from
+`<meta charset>`, since older filings are often windows-1252.
+
+**Normalization is deliberately light:** non-breaking spaces become spaces, and
+zero-width characters and soft hyphens are removed. Curly quotes, dashes and accented
+letters are kept. NFKC would also rewrite things like `½` and ligatures, and
+gold-evidence matching needs identical normalization on both sides. A later
+`normalize_for_match` can be stricter, applied to both sides at once.
+
+**Known gaps** (tripwires for Day 5, when the real filings arrive):
+- `rowspan` is ignored. It's rare in 10-K financial tables.
+- A colspan=1 heading sitting over a `$` column keeps that column, so it shows up as
+  an extra empty cell.
+- Page headers, footers and page numbers (e.g. `Example Corp | 2025 Form 10-K | 23`)
+  are kept for now. Removing them needs patterns from the real filings.
+- A literal `|` inside a cell isn't escaped. Rows are split on newlines, not pipes,
+  so the chunker isn't affected.
