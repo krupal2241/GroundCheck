@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "groundcheck"
+version = "0.1.0"
+description = "Claim-level hallucination verification for RAG over SEC 10-K filings."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+# Runtime dependencies are added module by module as they are built,
+# so every entry here is something the code actually imports.
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.6",
+]
+
+[project.scripts]
+groundcheck = "groundcheck.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+# E/W: pycodestyle, F: pyflakes, I: import sorting, UP: modern syntax,
+# B: common bug patterns, SIM: simplifications.
+select = ["E", "W", "F", "I", "UP", "B", "SIM"]

@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+
+# Tooling caches
+.pytest_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# Secrets: never commit. Copy .env.example to .env and fill it in locally.
+.env
+
+# Local caches (LLM responses, model downloads)
+.cache/
+
+# Large or re-creatable data. Raw filings are re-downloadable from SEC and the
+# index is rebuilt from chunks. Committed data (chunks, questions, candidates,
+# labels) is NOT ignored on purpose.
+data/raw/
+data/parsed/
+data/index/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
