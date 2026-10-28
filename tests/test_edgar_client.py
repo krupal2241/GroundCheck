@@ -1,4 +1,5 @@
 import pytest
+import requests
 
 from groundcheck.edgar.client import SecClient, SecRequestError
 from groundcheck.edgar.ratelimit import RateLimiter
@@ -128,3 +129,40 @@ def test_client_gives_up_after_max_retries():
     with pytest.raises(SecRequestError, match="503"):
         client.get("https://example.test/a")
     assert len(session.urls) == 3
+
+
+class FlakySession(FakeSession):
+    """Raises a connection error for the first `failures` requests."""
+
+    def __init__(self, failures, responses):
+        super().__init__(responses)
+        self.failures = failures
+
+    def get(self, url, timeout):
+        self.urls.append(url)
+        if self.failures > 0:
+            self.failures -= 1
+            raise requests.ConnectionError("connection reset")
+        return self.responses.pop(0)
+
+
+def make_flaky_client(failures, responses, max_retries=4):
+    clock = FakeClock()
+    return SecClient(
+        "Jane Doe jane@example.com",
+        limiter=RateLimiter(max_per_second=5, clock=clock, sleep=clock.sleep),
+        session=FlakySession(failures, responses),
+        max_retries=max_retries,
+        sleep=clock.sleep,
+    )
+
+
+def test_client_retries_network_errors():
+    client = make_flaky_client(failures=2, responses=[FakeResponse(200, b"ok")])
+    assert client.get("https://example.test/a") == b"ok"
+
+
+def test_client_reports_persistent_network_error_cleanly():
+    client = make_flaky_client(failures=10, responses=[], max_retries=2)
+    with pytest.raises(SecRequestError, match="network"):
+        client.get("https://example.test/a")
