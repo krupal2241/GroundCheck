@@ -5,6 +5,9 @@
 #   2. Check that the "SEC name" it prints matches the company you meant.
 #   3. Paste the printed accession / primary_document / filing_date / fiscal_year_end
 #      values below.
+# period is the period of report (the actual fiscal year-end date of the 10-K), added
+# by hand because SEC's fiscal_year_end is only approximate (e.g. JNJ reports "0103"
+# for a year ending 2025-12-28).
 # `groundcheck download` refuses to run until every company is pinned.
 #
 # CIKs were entered by hand; resolve-filings prints the name SEC has on file for each
@@ -20,70 +23,78 @@ companies:
     name: Apple Inc.
     cik: 320193
     role: labeled
-    accession: null
-    primary_document: null
-    filing_date: null
-    fiscal_year_end: null
+    accession: "0000320193-25-000079"
+    primary_document: "aapl-20250927.htm"
+    filing_date: "2025-10-31"
+    fiscal_year_end: "0926"
+    period: "2025-09-27"
 
   - ticker: MSFT
     name: Microsoft Corporation
     cik: 789019
     role: labeled
-    accession: null
-    primary_document: null
-    filing_date: null
-    fiscal_year_end: null
+    accession: "0001193125-26-323660"
+    primary_document: "msft-20260630.htm"
+    filing_date: "2026-07-29"
+    fiscal_year_end: "0630"
+    period: "2026-06-30"
 
   - ticker: AMZN
     name: Amazon.com, Inc.
     cik: 1018724
     role: labeled
-    accession: null
-    primary_document: null
-    filing_date: null
-    fiscal_year_end: null
+    accession: "0001018724-26-000004"
+    primary_document: "amzn-20251231.htm"
+    filing_date: "2026-02-06"
+    fiscal_year_end: "1231"
+    period: "2025-12-31"
 
   - ticker: JPM
     name: JPMorgan Chase & Co.
     cik: 19617
     role: unlabeled
-    accession: null
-    primary_document: null
-    filing_date: null
-    fiscal_year_end: null
+    accession: "0001628280-26-008131"
+    primary_document: "jpm-20251231.htm"
+    filing_date: "2026-02-13"
+    fiscal_year_end: "1231"
+    period: "2025-12-31"
 
   - ticker: XOM
     name: Exxon Mobil Corporation
     cik: 34088
     role: labeled
-    accession: null
-    primary_document: null
-    filing_date: null
-    fiscal_year_end: null
+    accession: "0000034088-26-000045"
+    primary_document: "xom-20251231.htm"
+    filing_date: "2026-02-18"
+    fiscal_year_end: "1231"
+    period: "2025-12-31"
 
   - ticker: JNJ
     name: Johnson & Johnson
     cik: 200406
     role: labeled
-    accession: null
-    primary_document: null
-    filing_date: null
-    fiscal_year_end: null
+    accession: "0000200406-26-000016"
+    primary_document: "jnj-20251228.htm"
+    filing_date: "2026-02-11"
+    fiscal_year_end: "0103"
+    period: "2025-12-28"
 
   - ticker: WMT
     name: Walmart Inc.
     cik: 104169
     role: labeled
-    accession: null
-    primary_document: null
-    filing_date: null
-    fiscal_year_end: null
+    accession: "0000104169-26-000055"
+    primary_document: "wmt-20260131.htm"
+    filing_date: "2026-03-13"
+    fiscal_year_end: "0131"
+    period: "2026-01-31"
 
   - ticker: BRK-B
     name: Berkshire Hathaway Inc.
     cik: 1067983
     role: stress_test
-    accession: null
-    primary_document: null
-    filing_date: null
-    fiscal_year_end: null
+    accession: "0001193125-26-083899"
+    primary_document: "brka-20251231.htm"
+    filing_date: "2026-03-02"
+    fiscal_year_end: "1231"
+    period: "2025-12-31"
