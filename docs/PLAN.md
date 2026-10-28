@@ -26,13 +26,14 @@ claim-level test set. No GPU, no fine-tuning, **$0 spend**.
 | Filings | Each company's latest 10-K, with **pinned accession numbers**. Fiscal years are not aligned; `fiscal_year_end` is recorded per company. |
 | Labeled set | Drawn from AAPL, MSFT, AMZN, WMT, XOM, JNJ: **~10 candidate questions per company (~60 items)** |
 | BRK-B | Parser stress test only, not in the labeled set |
-| JPM | Indexed and parsed; not in the labeled set |
+| JPM | Indexed and parsed (`role: unlabeled`); not in the labeled set |
 | Missing Item section | Logged as a WARNING (never silently skipped) |
 | Vector store | FAISS `IndexFlatIP` (exact cosine), **one index per company** |
 | Embeddings | `BAAI/bge-small-en-v1.5`, on CPU or Apple MPS |
 | LLM | Ollama (local) first. No paid adapter in Weeks 1–2. |
-| Default model | `llama3.2:3b` (the RAM wasn't specified, so the safe choice). Switch to an 8B tag such as `llama3.1:8b` on a 16 GB+ machine. |
+| Default model | `llama3.2:3b`: the MacBook Air M3 has 8 GB RAM, so a 3B model is what fits comfortably. |
 | Rounding rule | Supported only if the source value rounds correctly to the claim's own precision. Unit or scale mistakes count as **contradicted**. |
+| Workflow | One pull request per day of work; you review and merge it yourself |
 | Committed data | `data/chunks/*.jsonl`, question files, candidate JSONL, labels |
 
 ## Pipeline
@@ -118,11 +119,18 @@ string.
 
 ## Open questions
 
-- [ ] RAM of the MacBook Air (decides 3B vs 8B as the default model).
 - [ ] Accession numbers and fiscal year ends: to be filled from `resolve-filings` (Day 4).
 - [ ] Retrieval questions and gold evidence strings (Day 7).
 
+## Resolved
+
+- [x] RAM: 8 GB, so the default model is `llama3.2:3b` (Day 2).
+
 ## Risks
+
+- **The CIKs in `config/companies.yaml` were typed in by hand**, not looked up here
+  (sec.gov is unreachable from the sandbox). `resolve-filings` prints SEC's name for
+  each CIK; check it before pinning.
 
 - **This sandbox can't reach sec.gov or huggingface.co** (the proxy rejects the
   connection). Downloading, real parsing checks, embedding and generation all run on

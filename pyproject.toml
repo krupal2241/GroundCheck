@@ -11,7 +11,12 @@ requires-python = ">=3.11"
 license = { text = "MIT" }
 # Runtime dependencies are added module by module as they are built,
 # so every entry here is something the code actually imports.
-dependencies = []
+dependencies = [
+    "pydantic>=2.6",
+    "python-dotenv>=1.0",
+    "pyyaml>=6.0",
+    "requests>=2.31",
+]
 
 [project.optional-dependencies]
 dev = [

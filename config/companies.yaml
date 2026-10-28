@@ -1,0 +1,89 @@
+# Companies and the exact 10-K filing used for each.
+#
+# How to pin a filing (on your own machine; needs network access to sec.gov):
+#   1. groundcheck resolve-filings
+#   2. Check that the "SEC name" it prints matches the company you meant.
+#   3. Paste the printed accession / primary_document / filing_date / fiscal_year_end
+#      values below.
+# `groundcheck download` refuses to run until every company is pinned.
+#
+# CIKs were entered by hand; resolve-filings prints the name SEC has on file for each
+# CIK so a wrong one is caught before anything is downloaded.
+#
+# role:
+#   labeled      questions for the hand-labeled test set come from this company
+#   unlabeled    parsed and indexed, not used for the labeled set
+#   stress_test  parser stress test only
+
+companies:
+  - ticker: AAPL
+    name: Apple Inc.
+    cik: 320193
+    role: labeled
+    accession: null
+    primary_document: null
+    filing_date: null
+    fiscal_year_end: null
+
+  - ticker: MSFT
+    name: Microsoft Corporation
+    cik: 789019
+    role: labeled
+    accession: null
+    primary_document: null
+    filing_date: null
+    fiscal_year_end: null
+
+  - ticker: AMZN
+    name: Amazon.com, Inc.
+    cik: 1018724
+    role: labeled
+    accession: null
+    primary_document: null
+    filing_date: null
+    fiscal_year_end: null
+
+  - ticker: JPM
+    name: JPMorgan Chase & Co.
+    cik: 19617
+    role: unlabeled
+    accession: null
+    primary_document: null
+    filing_date: null
+    fiscal_year_end: null
+
+  - ticker: XOM
+    name: Exxon Mobil Corporation
+    cik: 34088
+    role: labeled
+    accession: null
+    primary_document: null
+    filing_date: null
+    fiscal_year_end: null
+
+  - ticker: JNJ
+    name: Johnson & Johnson
+    cik: 200406
+    role: labeled
+    accession: null
+    primary_document: null
+    filing_date: null
+    fiscal_year_end: null
+
+  - ticker: WMT
+    name: Walmart Inc.
+    cik: 104169
+    role: labeled
+    accession: null
+    primary_document: null
+    filing_date: null
+    fiscal_year_end: null
+
+  - ticker: BRK-B
+    name: Berkshire Hathaway Inc.
+    cik: 1067983
+    role: stress_test
+    accession: null
+    primary_document: null
+    filing_date: null
+    fiscal_year_end: null
