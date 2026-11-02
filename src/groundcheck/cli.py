@@ -25,6 +25,14 @@ from groundcheck.edgar.client import SecClient, SecRequestError
 from groundcheck.edgar.download import DEFAULT_RAW_DIR, download_all, resolve_latest_10k
 from groundcheck.parsing.filing import DEFAULT_PARSED_DIR, load_parsed, parse_company
 from groundcheck.retrieval.embedder import BGE_MAX_TOKENS, make_embedder
+from groundcheck.retrieval.evaluate import (
+    DEFAULT_KS,
+    DEFAULT_QUESTIONS_PATH,
+    check_questions,
+    evaluate,
+    format_report,
+    load_questions,
+)
 from groundcheck.retrieval.index import DEFAULT_INDEX_DIR, CompanyIndex, build_company_index
 
 
@@ -135,6 +143,44 @@ def cmd_retrieve(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_eval_retrieval(args: argparse.Namespace) -> int:
+    ks = tuple(sorted(set(args.k)))
+    if ks[0] < 1:
+        raise ConfigError("-k values must be positive")
+    questions = load_questions(args.questions).questions
+    filled = [q for q in questions if q.is_filled]
+    print(f"{len(filled)} of {len(questions)} question(s) filled in {args.questions}")
+    tickers = sorted({q.ticker for q in filled})
+    corpora = {
+        t: read_chunks(chunks_path(t, args.chunks_dir))
+        for t in tickers
+        if chunks_path(t, args.chunks_dir).is_file()
+    }
+    problems = check_questions(questions, corpora)
+    for problem in problems:
+        print(f"WARNING: {problem}")
+    if args.check:
+        print("Gold evidence check: " + ("OK" if not problems else f"{len(problems)} problem(s)"))
+        return 1 if problems else 0
+    if not filled:
+        print("Nothing to evaluate yet: fill in questions and gold_evidence first.")
+        return 1
+
+    embedder = make_embedder(args.embedder, args.device)
+    indexes = {t: CompanyIndex.load(t, args.chunks_dir, args.index_dir) for t in corpora}
+
+    def retrieve(ticker: str, question: str, k: int):
+        return [hit.chunk for hit in indexes[ticker].search(embedder, question, k)]
+
+    report = evaluate(questions, corpora, retrieve, embedder.name, ks)
+    print(format_report(report))
+    out = args.out or args.results_dir / f"retrieval_{embedder.name.replace('/', '_')}.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(report.model_dump_json(indent=2) + "\n")
+    print(f"Per-question results: {out}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="groundcheck",
@@ -218,6 +264,24 @@ def build_parser() -> argparse.ArgumentParser:
     retrieve.add_argument("question")
     retrieve.add_argument("-k", type=int, default=5)
     retrieve.set_defaults(func=cmd_retrieve)
+
+    evaluation = subparsers.add_parser(
+        "eval-retrieval",
+        parents=[embed_options],
+        help="recall@k and section-hit@k against the gold evidence in the question file",
+    )
+    evaluation.add_argument("--questions", type=Path, default=DEFAULT_QUESTIONS_PATH)
+    evaluation.add_argument("-k", type=int, nargs="+", default=list(DEFAULT_KS))
+    evaluation.add_argument(
+        "--results-dir", type=Path, default=DEFAULT_QUESTIONS_PATH.parent / "results"
+    )
+    evaluation.add_argument("--out", type=Path, default=None, help="report JSON path")
+    evaluation.add_argument(
+        "--check",
+        action="store_true",
+        help="only check that every gold string occurs in the chunks (no model needed)",
+    )
+    evaluation.set_defaults(func=cmd_eval_retrieval)
     return parser
 
 
