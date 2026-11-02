@@ -9,6 +9,7 @@ Two kinds of settings live in two places:
   the SEC user agent. These never go in the repo.
 """
 
+import datetime as dt
 import os
 import re
 from pathlib import Path
@@ -16,7 +17,14 @@ from typing import Literal
 
 import yaml
 from dotenv import load_dotenv
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_COMPANIES_PATH = REPO_ROOT / "config" / "companies.yaml"
@@ -36,6 +44,9 @@ class ConfigError(Exception):
 class Company(BaseModel):
     """One company and the 10-K filing pinned for it."""
 
+    # A misspelled key (e.g. `acession:`) must fail loudly instead of being dropped.
+    model_config = ConfigDict(extra="forbid")
+
     ticker: str
     name: str
     cik: int = Field(gt=0, description="SEC Central Index Key, without leading zeros.")
@@ -49,6 +60,22 @@ class Company(BaseModel):
     filing_date: str | None = None
     # As reported by SEC, e.g. "0928" for a fiscal year ending September 28.
     fiscal_year_end: str | None = None
+    # Period of report: the actual fiscal year-end date of the 10-K (YYYY-MM-DD), added
+    # by hand because SEC's fiscal_year_end is only approximate (JNJ reports "0103" for
+    # a year ending 2025-12-28).
+    period: str | None = None
+
+    @field_validator("filing_date", "period")
+    @classmethod
+    def _check_iso_date(cls, value: str | None) -> str | None:
+        if value is not None:
+            try:
+                dt.date.fromisoformat(value)
+            except ValueError as exc:
+                raise ValueError(f"{value!r} must be a date like 2025-09-27") from exc
+            if len(value) != 10:
+                raise ValueError(f"{value!r} must be a date like 2025-09-27")
+        return value
 
     @field_validator("accession")
     @classmethod
@@ -71,6 +98,8 @@ class Company(BaseModel):
 
 
 class CompaniesConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     companies: list[Company]
 
     @model_validator(mode="after")
@@ -94,7 +123,11 @@ def load_companies(path: Path = DEFAULT_COMPANIES_PATH) -> CompaniesConfig:
         raw = yaml.safe_load(Path(path).read_text())
     except FileNotFoundError as exc:
         raise ConfigError(f"config file not found: {path}") from exc
-    return CompaniesConfig.model_validate(raw)
+    try:
+        return CompaniesConfig.model_validate(raw)
+    except ValidationError as exc:
+        # Shown by the CLI as a clean one-screen error instead of a traceback.
+        raise ConfigError(f"invalid config {path}:\n{exc}") from exc
 
 
 def load_env_file(env_file: Path | None = None) -> bool:

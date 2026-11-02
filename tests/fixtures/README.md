@@ -14,3 +14,8 @@ names, CIKs, accession numbers and figures are made up and refer to no real comp
 - `parsing/donnelley_style.htm`: the shape of an older Donnelley-style 10-K: uppercase
   tags, `<font>`, `<br>` inside paragraphs, a bullet list laid out as a table, a
   single-cell "box" table, `<th>` headers and a nested table.
+- `parsing/sections_10k.htm`: the overall shape of a 10-K for the Item splitter: a
+  cover page, a table of contents laid out as a table *and* again as prose lines, page
+  footers and page numbers, an `Item 1A.` heading with its title in the next block, an
+  Item heading laid out as a one-row table, an `Item 1B` whose body is just "None.",
+  and an `Item 8 ... (continued)` heading repeated on a later page.

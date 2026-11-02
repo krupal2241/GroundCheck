@@ -151,3 +151,44 @@ def test_real_env_var_wins_over_env_file(no_dotenv, tmp_path, monkeypatch):
     _write_env(tmp_path / ".env", "From File f@example.com")
     monkeypatch.setenv("SEC_USER_AGENT", "From Shell s@example.com")
     assert get_sec_user_agent() == "From Shell s@example.com"
+
+
+# --- period field and unknown keys ----------------------------------------------------
+
+
+def test_committed_config_has_period_for_every_company():
+    config = load_companies(DEFAULT_COMPANIES_PATH)
+    assert config.get("JNJ").period == "2025-12-28"
+    assert all(c.period for c in config.companies)
+
+
+def test_period_must_be_iso_date():
+    assert make_company(period="2025-09-27").period == "2025-09-27"
+    for bad in ["2025-13-01", "20250927", "Sept 27, 2025"]:
+        with pytest.raises(ValidationError, match="must be a date"):
+            make_company(period=bad)
+
+
+def test_filing_date_must_be_iso_date():
+    with pytest.raises(ValidationError, match="must be a date"):
+        make_company(filing_date="10/31/2025")
+
+
+def test_unknown_company_field_rejected():
+    # A typo such as `acession:` used to be silently dropped by pydantic.
+    with pytest.raises(ValidationError, match="acession"):
+        make_company(acession="0000320193-24-000123")
+
+
+def test_unknown_top_level_field_rejected():
+    with pytest.raises(ValidationError, match="extra"):
+        CompaniesConfig.model_validate({"companies": [], "compnies": []})
+
+
+def test_invalid_config_file_is_a_config_error(tmp_path):
+    path = tmp_path / "companies.yaml"
+    path.write_text(
+        "companies:\n  - {ticker: A, name: A, cik: 1, role: labeled, perod: '2025-01-01'}\n"
+    )
+    with pytest.raises(ConfigError, match="perod"):
+        load_companies(path)

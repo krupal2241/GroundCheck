@@ -187,3 +187,35 @@ def test_donnelley_style_fixture():
         "[/TABLE]"
     )
     assert text.count("[TABLE]") == 1
+
+
+# --- rowspan -------------------------------------------------------------------------
+
+
+def test_rowspan_keeps_later_rows_aligned():
+    html = """<table>
+    <tr><td rowspan="2">Segment A</td><td>Q1</td><td>10</td></tr>
+    <tr><td>Q2</td><td>20</td></tr>
+    <tr><td>Segment B</td><td>Q1</td><td>30</td></tr>
+    </table>"""
+    assert rows_of(html) == [
+        ["Segment A", "Q1", "10"],
+        ["", "Q2", "20"],  # the spanned cell's text is not repeated
+        ["Segment B", "Q1", "30"],
+    ]
+
+
+def test_rowspan_in_a_middle_column():
+    html = """<table>
+    <tr><td>a</td><td rowspan="3">shared</td><td>1</td></tr>
+    <tr><td>b</td><td>2</td></tr>
+    <tr><td>c</td><td>3</td></tr>
+    <tr><td>d</td><td>x</td><td>4</td></tr>
+    </table>"""
+    assert rows_of(html) == [["a", "shared", "1"], ["b", "", "2"], ["c", "", "3"], ["d", "x", "4"]]
+
+
+@pytest.mark.parametrize("rowspan", ["0", "abc", "100000"])
+def test_malformed_rowspan_does_not_crash(rowspan):
+    html = f"<table><tr><td rowspan='{rowspan}'>a</td><td>b</td></tr><tr><td>c</td></tr></table>"
+    assert rows_of(html)[0] == ["a", "b"]

@@ -90,6 +90,14 @@ module's* location, so it always found the repo-root `.env`, even in tests that 
 changed to an empty folder. Tests also run with the network blocked (`tests/conftest.py`),
 so none of them can reach sec.gov.
 
+**Unknown keys are rejected, and `period` is a real field:** pydantic ignores unknown
+keys by default, so the hand-added `period:` lines were silently dropped, and a typo
+like `acession:` would have been too (leaving the company "unpinned" with no hint why).
+Both models now use `extra="forbid"`. `period` (the period of report, YYYY-MM-DD) is
+validated as a date, as is `filing_date`. `resolve-filings` prints a `period:` line so
+the pasted block is complete. A bad config file raises `ConfigError`, which the CLI
+prints as a clean error rather than a traceback.
+
 ## EDGAR download (`edgar/`), Day 2
 
 **What:** three small files.
@@ -210,10 +218,69 @@ gold-evidence matching needs identical normalization on both sides. A later
 `normalize_for_match` can be stricter, applied to both sides at once.
 
 **Known gaps** (tripwires for Day 5, when the real filings arrive):
-- `rowspan` is ignored. It's rare in 10-K financial tables.
+- ~~`rowspan` is ignored.~~ Handled since Day 4: see below.
 - A colspan=1 heading sitting over a `$` column keeps that column, so it shows up as
   an extra empty cell.
-- Page headers, footers and page numbers (e.g. `Example Corp | 2025 Form 10-K | 23`)
-  are kept for now. Removing them needs patterns from the real filings.
+- ~~Page headers, footers and page numbers are kept.~~ The common shapes are removed
+  since Day 4 (`parsing/cleanup.py`); unusual footers still need the real filings.
 - A literal `|` inside a cell isn't escaped. Rows are split on newlines, not pipes,
   so the chunker isn't affected.
+
+## Item sections and `groundcheck parse` (`parsing/sections.py`, `cleanup.py`, `filing.py`), Day 4
+
+**What:** `groundcheck parse` reads each pinned filing from `data/raw/`, turns it into
+text (`html_to_text`), removes page furniture, splits it into Item sections, and writes
+`data/parsed/<TICKER>.json` (a `ParsedFiling`: metadata, the source file's sha256,
+sections, warnings) plus `<TICKER>.txt` (the full cleaned text, handy for copying gold
+evidence strings). It prints each section's title, character and word counts, and any
+warnings.
+
+**Heading detection:** a block is a heading candidate if it starts with `Item 7.`,
+`ITEM 1A`, `Items 1 and 2.`, `PART II, Item 5.` and so on, and is at most 200
+characters. If the text after the item number starts lowercase ("Item 7 of this
+report...") it's a sentence, not a heading. A one-row `[TABLE]` also counts, because
+some filers lay out `Item 7. | Management's Discussion` as a two-cell table. A table
+with several rows never counts, so a table of contents laid out as a table is ignored.
+
+**Duplicate headings (the table of contents):** each Item heading usually appears
+twice, once in the TOC and once where the section starts, plus sometimes again as
+"(continued)". Items are picked in canonical order (1 < 1A < 1B < 2 < ... < 16), each
+after the previous pick: the first candidate followed by at least 200 characters
+before the next candidate, else the last one (for items whose whole body is "None.").
+TOC lines are followed by almost nothing, so they lose. The ordering stops the *last*
+TOC line, which is often followed by a long forward-looking-statements block, from
+being picked. A later duplicate ("(continued)") stays inside the section it repeats.
+*Alternatives:* "always take the last occurrence" breaks on "(continued)" headings;
+"take the longest span" can pick a "(continued)" page and drop the real start.
+
+**Sections** run from their heading (included in the text) to the next picked heading.
+Text before the first one (cover page, TOC) is front matter: its length is recorded,
+but it isn't a section, so it's never chunked. A trailing `PART II` line is trimmed off
+the end of the section before it. `Items 1 and 2.` (Exxon's style) becomes one
+section with `covers: ["1", "2"]`.
+
+**Warnings:** each of Items 1, 1A, 7 and 8 that isn't found is logged as a WARNING
+(prefixed with the ticker), stored in the JSON, and printed by `parse`. A heading that
+only appears out of order is a warning too. Nothing is silently skipped.
+
+**Page furniture** (`cleanup.py`), removed block by block with conservative patterns:
+bare page numbers (`23`, `Page 7`, `- 13 -`, `ii`), "Table of Contents" back-links,
+and short (≤120 characters) running footers that mention `10-K` and start or end with
+a page number (`Apple Inc. | 2025 Form 10-K | 23`). Item headings and tables are never
+removed. *Alternative:* drop any short line repeated on many pages. That's more
+general, but it could also drop a repeated real sentence, and it needs the real
+filings to tune.
+
+**Rowspan** (`html_text.py`): cells are placed on a column grid. A cell with
+`rowspan=N` occupies its columns in the next N-1 rows too, so those rows' cells start
+further right and stay aligned. Its text appears only in its first row, so a value is
+never shown as reported twice.
+
+**Known gaps** (to check with the real filings):
+- JPM's 10-K is mostly its annual report plus a "Form 10-K cross-reference index", so
+  it may not have normal Item headings. Expect missing-Item warnings there; that's the
+  tripwire working, not a crash. Fixing it would mean mapping the index's page numbers.
+- Headings split across two blocks *before* the item number (e.g. `ITEM` and `7.` in
+  separate `<div>`s) aren't recognized.
+- Footers that don't mention `10-K` and aren't a bare number (e.g. only the company
+  name) are kept.
