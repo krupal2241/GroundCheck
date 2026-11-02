@@ -328,3 +328,51 @@ byte-identical output, so git diffs show only real changes.
 10-K sentences with "Inc." and "U.S." trip simple ones), and token-based windows
 (needs the tokenizer at chunk time, which the sandbox and CI don't have). Both can
 plug in behind the same interface later.
+
+## Embeddings and per-company FAISS indexes (`retrieval/embedder.py`, `index.py`), Day 6
+
+**What:** `groundcheck index` embeds each company's chunks and writes
+`data/index/<TICKER>/index.faiss` plus `meta.json`. `groundcheck retrieve TICKER
+"question" -k 5` prints the top chunks with their cosine scores.
+
+**The `Embedder` interface:** `name`, `dim`, `embed_documents(texts)` and
+`embed_queries(texts)`, each returning float32, L2-normalized rows.
+- `BgeEmbedder` wraps `BAAI/bge-small-en-v1.5` (384 dimensions, 512-token limit) in
+  sentence-transformers. It runs on Apple MPS when PyTorch reports it, else on CPU
+  (`--device` overrides). Queries get bge's recommended instruction prefix
+  ("Represent this sentence for searching relevant passages: "); passages don't, as the
+  model card says. sentence-transformers lives in the `[embed]` extra because it pulls
+  in PyTorch. Without it you get a clean error telling you to install the extra.
+- `HashingEmbedder` is the test fake: each lowercase word (numbers like `12,345` stay
+  one token) is hashed with blake2b into one of 256 buckets. Word overlap then gives
+  cosine similarity, so tests can assert sensible rankings. It's deterministic across
+  processes because it uses `hashlib`, not Python's per-process salted `hash()`.
+  `--embedder hashing` also lets you smoke-test the whole pipeline without the model.
+
+**Why `IndexFlatIP` on normalized vectors:** for unit vectors the inner product *is*
+cosine similarity, and a flat index compares the query with every vector, so results
+are exact. A filing is a few thousand chunks at most; exact search over that takes
+well under a millisecond, so approximate indexes (IVF, HNSW) would only add recall
+error and tuning knobs. Vectors are normalized again after the model, even though
+sentence-transformers was asked to normalize, so the fake and the real model take the
+same path.
+
+**Why one index per company:** each question is about one filing, so it should get its
+full `top_k` from that filing. With one shared index, a near-identical risk-factor
+sentence from another company could take up slots. The test
+`test_one_index_per_company` checks this.
+
+**Staleness guards** (`meta.json`): the index records the embedder name and dimension,
+the chunker name, the chunk IDs in vector order, and the sha256 of the chunks file.
+Loading fails if the chunks file has changed since the index was built. Searching
+fails if the query embedder differs from the build embedder. Both mistakes would
+otherwise return confident-looking, wrong results.
+
+**Token check:** with the real model, `index` counts each chunk's tokens with the bge
+tokenizer and prints a WARNING for any chunk over 512 tokens, which the model would
+silently truncate. This is the check the chunker's word limits rely on.
+
+**Tests** never load the real model: the bge wrapper is tested against a stand-in
+`sentence_transformers` module (device choice, `max_seq_length`, query prefix,
+normalization), and FAISS behavior with the hashing embedder. `faiss-cpu` and `numpy`
+are normal dependencies (small wheels, no GPU), so CI tests the real index code.

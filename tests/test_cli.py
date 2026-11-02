@@ -121,3 +121,16 @@ def test_chunk_before_parse_is_a_clean_error(capsys, tmp_path):
     args = ["chunk", "--config", str(_pinned_config(tmp_path)), "--parsed-dir", str(tmp_path)]
     assert main(args) == 2
     assert "run `groundcheck parse`" in capsys.readouterr().err
+
+
+def test_index_and_retrieve_commands_with_fake_embedder(capsys, tmp_path):
+    test_chunk_command(capsys, tmp_path)  # writes tmp_path/chunks/EXCO.jsonl
+    common = ["--chunks-dir", str(tmp_path / "chunks"), "--index-dir", str(tmp_path / "index")]
+    common += ["--embedder", "hashing"]
+    config = ["--config", str(_pinned_config(tmp_path))]
+    assert main(["index", *config, *common]) == 0
+    assert "hashing-256" in capsys.readouterr().out
+    assert main(["retrieve", "EXCO", "What were total net sales?", "-k", "3", *common]) == 0
+    out = capsys.readouterr().out.splitlines()
+    assert len(out) == 3 and out[0].startswith(" 1. ")
+    assert all("EXCO-" in line for line in out)
