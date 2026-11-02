@@ -90,6 +90,14 @@ module's* location, so it always found the repo-root `.env`, even in tests that 
 changed to an empty folder. Tests also run with the network blocked (`tests/conftest.py`),
 so none of them can reach sec.gov.
 
+**Unknown keys are rejected, and `period` is a real field:** pydantic ignores unknown
+keys by default, so the hand-added `period:` lines were silently dropped, and a typo
+like `acession:` would have been too (leaving the company "unpinned" with no hint why).
+Both models now use `extra="forbid"`. `period` (the period of report, YYYY-MM-DD) is
+validated as a date, as is `filing_date`. `resolve-filings` prints a `period:` line so
+the pasted block is complete. A bad config file raises `ConfigError`, which the CLI
+prints as a clean error rather than a traceback.
+
 ## EDGAR download (`edgar/`), Day 2
 
 **What:** three small files.

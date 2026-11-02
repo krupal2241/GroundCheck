@@ -37,7 +37,8 @@ def cmd_resolve_filings(args: argparse.Namespace) -> int:
         print(f"    accession: {info.accession}")
         print(f"    primary_document: {info.primary_document}")
         print(f'    filing_date: "{info.filing_date}"')
-        print(f'    fiscal_year_end: "{info.fiscal_year_end}"\n')
+        print(f'    fiscal_year_end: "{info.fiscal_year_end}"')
+        print(f'    period: "{info.report_date}"\n')
     return 0
 
 
