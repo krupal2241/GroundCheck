@@ -98,3 +98,26 @@ def test_parse_without_download_is_a_clean_error(capsys, tmp_path):
     args = ["parse", "--config", str(_pinned_config(tmp_path)), "--raw-dir", str(tmp_path)]
     assert main([*args, "--parsed-dir", str(tmp_path / "parsed")]) == 2
     assert "run `groundcheck download`" in capsys.readouterr().err
+
+
+def test_chunk_command(capsys, tmp_path):
+    test_parse_command(capsys, tmp_path)  # writes tmp_path/parsed/EXCO.json
+    chunks_dir = tmp_path / "chunks"
+    args = ["chunk", "--config", str(_pinned_config(tmp_path)), "--parsed-dir"]
+    assert main([*args, str(tmp_path / "parsed"), "--chunks-dir", str(chunks_dir)]) == 0
+    out = capsys.readouterr().out
+    assert "fixed-p250-o50-t120" in out and "EXCO" in out
+    lines = (chunks_dir / "EXCO.jsonl").read_text().splitlines()
+    assert lines and '"kind": "table"' in "".join(lines)
+
+
+def test_chunk_bad_settings_is_a_clean_error(capsys, tmp_path):
+    args = ["chunk", "--config", str(_pinned_config(tmp_path)), "--overlap", "300"]
+    assert main(args) == 2
+    assert "overlap" in capsys.readouterr().err
+
+
+def test_chunk_before_parse_is_a_clean_error(capsys, tmp_path):
+    args = ["chunk", "--config", str(_pinned_config(tmp_path)), "--parsed-dir", str(tmp_path)]
+    assert main(args) == 2
+    assert "run `groundcheck parse`" in capsys.readouterr().err
