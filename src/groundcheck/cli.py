@@ -25,7 +25,7 @@ from groundcheck.edgar.download import DEFAULT_RAW_DIR, download_all, resolve_la
 
 def cmd_resolve_filings(args: argparse.Namespace) -> int:
     config = load_companies(args.config)
-    client = SecClient(get_sec_user_agent())
+    client = SecClient(get_sec_user_agent(args.env_file))
     companies = [config.get(t) for t in args.only] if args.only else config.companies
 
     print("# Paste these values into config/companies.yaml.")
@@ -44,7 +44,7 @@ def cmd_resolve_filings(args: argparse.Namespace) -> int:
 def cmd_download(args: argparse.Namespace) -> int:
     config = load_companies(args.config)
     companies = [config.get(t) for t in args.only] if args.only else config.companies
-    client = SecClient(get_sec_user_agent())
+    client = SecClient(get_sec_user_agent(args.env_file))
     results = download_all(client, companies, args.raw_dir)
     fetched = sum(results.values())
     print(f"Downloaded {fetched} filing(s); {len(results) - fetched} already cached.")
@@ -65,6 +65,12 @@ def build_parser() -> argparse.ArgumentParser:
     edgar_options.add_argument("--config", type=Path, default=DEFAULT_COMPANIES_PATH)
     edgar_options.add_argument("--raw-dir", type=Path, default=DEFAULT_RAW_DIR)
     edgar_options.add_argument("--only", nargs="+", metavar="TICKER", help="limit to tickers")
+    edgar_options.add_argument(
+        "--env-file",
+        type=Path,
+        default=None,
+        help="read SEC_USER_AGENT from this file (default: ./.env in the current directory)",
+    )
 
     resolve = subparsers.add_parser(
         "resolve-filings",

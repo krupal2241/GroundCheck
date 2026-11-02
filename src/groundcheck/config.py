@@ -97,18 +97,40 @@ def load_companies(path: Path = DEFAULT_COMPANIES_PATH) -> CompaniesConfig:
     return CompaniesConfig.model_validate(raw)
 
 
-def get_sec_user_agent() -> str:
-    """Return SEC_USER_AGENT from the environment (or .env), checking its format.
+def load_env_file(env_file: Path | None = None) -> bool:
+    """Load variables from a .env file into os.environ, without overriding real ones.
 
-    SEC's fair-access policy asks every automated client to identify itself with a
-    name and contact email. We refuse to make requests without one.
+    The file is `env_file` if given, else `.env` in the *current working directory*.
+    There is deliberately no upward search: python-dotenv's default (`find_dotenv`)
+    walks up from the calling module's own location, so it would always find the
+    repo's `.env` no matter where you run from, including inside tests.
+
+    Returns True if a file was loaded. A missing default `.env` is fine (values can
+    come from the shell); a missing explicitly requested file is an error.
     """
-    load_dotenv()  # no-op if there is no .env file; never overrides real env vars
+    path = Path(env_file) if env_file is not None else Path.cwd() / ".env"
+    if not path.is_file():
+        if env_file is not None:
+            raise ConfigError(f"env file not found: {path}")
+        return False
+    load_dotenv(dotenv_path=path, override=False)
+    return True
+
+
+def get_sec_user_agent(env_file: Path | None = None) -> str:
+    """Return SEC_USER_AGENT from the environment (or a .env file), checking its format.
+
+    See `load_env_file` for which .env file is read. SEC's fair-access policy asks every
+    automated client to identify itself with a name and contact email. We refuse to make
+    requests without one.
+    """
+    load_env_file(env_file)
     value = os.environ.get("SEC_USER_AGENT", "").strip().strip('"')
     if not value:
         raise ConfigError(
             'SEC_USER_AGENT is not set. Add a line like SEC_USER_AGENT="Your Name '
-            'you@example.com" to your .env file (see .env.example).'
+            'you@example.com" to the .env file in the directory you run from '
+            "(see .env.example), or pass --env-file."
         )
     if not USER_AGENT_RE.match(value):
         raise ConfigError(f'SEC_USER_AGENT={value!r} should look like "Your Name you@example.com".')
