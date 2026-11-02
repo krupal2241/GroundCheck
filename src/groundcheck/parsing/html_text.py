@@ -82,11 +82,8 @@ def table_rows(table: Tag) -> list[list[str]]:
 
     Every row has the same number of cells. Rows with no text at all are dropped.
     """
-    rows = [
-        _row_cells(tr)
-        for tr in table.find_all("tr")
-        if tr.find_parent("table") is table and not _is_hidden(tr)
-    ]
+    trs = [tr for tr in table.find_all("tr") if tr.find_parent("table") is table]
+    rows = _grid_rows([tr for tr in trs if not _is_hidden(tr)])
     for row in rows:
         _merge_split_cells(row)
 
@@ -124,18 +121,36 @@ class _Cell:
         return range(self.start, self.start + self.span)
 
 
-def _row_cells(tr: Tag) -> list[_Cell]:
-    cells, column = [], 0
-    for td in tr.find_all(["td", "th"], recursive=False):
-        span = _colspan(td)
-        text = "" if _is_hidden(td) else " ".join(_blocks(td, flatten_tables=True))
-        cells.append(_Cell(text=text, start=column, span=span))
-        column += span
-    return cells
+def _grid_rows(trs: list[Tag]) -> list[list[_Cell]]:
+    """Place every cell on a column grid, honouring colspan and rowspan.
+
+    A cell with rowspan=N occupies its columns in the next N-1 rows too, so the cells of
+    those rows start further right. Its text appears only in its first row: repeating
+    a value would make it look like it was reported twice.
+    """
+    rows = []
+    carried: dict[int, list[int]] = {}  # start column -> [rows still covered, span]
+    for tr in trs:
+        occupied = {c for start, (_, span) in carried.items() for c in range(start, start + span)}
+        cells, column = [], 0
+        new_carried = {}
+        for td in tr.find_all(["td", "th"], recursive=False):
+            while column in occupied:
+                column += 1
+            span = _span(td, "colspan")
+            text = "" if _is_hidden(td) else " ".join(_blocks(td, flatten_tables=True))
+            cells.append(_Cell(text=text, start=column, span=span))
+            if (rowspan := _span(td, "rowspan")) > 1:
+                new_carried[column] = [rowspan - 1, span]
+            column += span
+        carried = {k: [n - 1, span] for k, (n, span) in carried.items() if n > 1}
+        carried.update(new_carried)
+        rows.append(cells)
+    return rows
 
 
-def _colspan(td: Tag) -> int:
-    match = re.match(r"\s*(\d+)", str(td.get("colspan", "1")))
+def _span(td: Tag, attribute: str) -> int:
+    match = re.match(r"\s*(\d+)", str(td.get(attribute, "1")))
     return min(max(int(match.group(1)), 1), MAX_COLSPAN) if match else 1
 
 

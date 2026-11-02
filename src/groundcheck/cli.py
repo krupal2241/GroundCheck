@@ -21,6 +21,7 @@ from groundcheck.config import (
 )
 from groundcheck.edgar.client import SecClient, SecRequestError
 from groundcheck.edgar.download import DEFAULT_RAW_DIR, download_all, resolve_latest_10k
+from groundcheck.parsing.filing import DEFAULT_PARSED_DIR, parse_company
 
 
 def cmd_resolve_filings(args: argparse.Namespace) -> int:
@@ -49,6 +50,33 @@ def cmd_download(args: argparse.Namespace) -> int:
     results = download_all(client, companies, args.raw_dir)
     fetched = sum(results.values())
     print(f"Downloaded {fetched} filing(s); {len(results) - fetched} already cached.")
+    return 0
+
+
+def cmd_parse(args: argparse.Namespace) -> int:
+    config = load_companies(args.config)
+    companies = [config.get(t) for t in args.only] if args.only else config.companies
+    total_warnings = 0
+    for company in companies:
+        parsed = parse_company(company, args.raw_dir, args.parsed_dir)
+        print(
+            f"{company.ticker}  {parsed.accession}  page-furniture blocks removed: "
+            f"{parsed.removed_furniture_blocks}, front matter: {parsed.front_matter_chars:,} chars"
+        )
+        for section in parsed.sections:
+            label = (
+                "Items " + ", ".join(section.covers) if section.covers else f"Item {section.item}"
+            )
+            words = len(section.text.split())
+            print(
+                f"  {label:<14} {section.title[:48]:<48} {len(section.text):>9,} chars"
+                f" {words:>8,} words"
+            )
+        for message in parsed.warnings:
+            print(f"  WARNING: {message}")
+        total_warnings += len(parsed.warnings)
+        print()
+    print(f"Parsed {len(companies)} filing(s) into {args.parsed_dir}; {total_warnings} warning(s).")
     return 0
 
 
@@ -85,6 +113,15 @@ def build_parser() -> argparse.ArgumentParser:
         "download", parents=[edgar_options], help="download the pinned 10-K filings"
     )
     download.set_defaults(func=cmd_download)
+
+    parse = subparsers.add_parser(
+        "parse", help="split downloaded filings into Item sections (data/raw -> data/parsed)"
+    )
+    parse.add_argument("--config", type=Path, default=DEFAULT_COMPANIES_PATH)
+    parse.add_argument("--raw-dir", type=Path, default=DEFAULT_RAW_DIR)
+    parse.add_argument("--parsed-dir", type=Path, default=DEFAULT_PARSED_DIR)
+    parse.add_argument("--only", nargs="+", metavar="TICKER", help="limit to tickers")
+    parse.set_defaults(func=cmd_parse)
     return parser
 
 
