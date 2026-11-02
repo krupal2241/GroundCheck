@@ -328,3 +328,98 @@ byte-identical output, so git diffs show only real changes.
 10-K sentences with "Inc." and "U.S." trip simple ones), and token-based windows
 (needs the tokenizer at chunk time, which the sandbox and CI don't have). Both can
 plug in behind the same interface later.
+
+## Embeddings and per-company FAISS indexes (`retrieval/embedder.py`, `index.py`), Day 6
+
+**What:** `groundcheck index` embeds each company's chunks and writes
+`data/index/<TICKER>/index.faiss` plus `meta.json`. `groundcheck retrieve TICKER
+"question" -k 5` prints the top chunks with their cosine scores.
+
+**The `Embedder` interface:** `name`, `dim`, `embed_documents(texts)` and
+`embed_queries(texts)`, each returning float32, L2-normalized rows.
+- `BgeEmbedder` wraps `BAAI/bge-small-en-v1.5` (384 dimensions, 512-token limit) in
+  sentence-transformers. It runs on Apple MPS when PyTorch reports it, else on CPU
+  (`--device` overrides). Queries get bge's recommended instruction prefix
+  ("Represent this sentence for searching relevant passages: "); passages don't, as the
+  model card says. sentence-transformers lives in the `[embed]` extra because it pulls
+  in PyTorch. Without it you get a clean error telling you to install the extra.
+- `HashingEmbedder` is the test fake: each lowercase word (numbers like `12,345` stay
+  one token) is hashed with blake2b into one of 256 buckets. Word overlap then gives
+  cosine similarity, so tests can assert sensible rankings. It's deterministic across
+  processes because it uses `hashlib`, not Python's per-process salted `hash()`.
+  `--embedder hashing` also lets you smoke-test the whole pipeline without the model.
+
+**Why `IndexFlatIP` on normalized vectors:** for unit vectors the inner product *is*
+cosine similarity, and a flat index compares the query with every vector, so results
+are exact. A filing is a few thousand chunks at most; exact search over that takes
+well under a millisecond, so approximate indexes (IVF, HNSW) would only add recall
+error and tuning knobs. Vectors are normalized again after the model, even though
+sentence-transformers was asked to normalize, so the fake and the real model take the
+same path.
+
+**Why one index per company:** each question is about one filing, so it should get its
+full `top_k` from that filing. With one shared index, a near-identical risk-factor
+sentence from another company could take up slots. The test
+`test_one_index_per_company` checks this.
+
+**Staleness guards** (`meta.json`): the index records the embedder name and dimension,
+the chunker name, the chunk IDs in vector order, and the sha256 of the chunks file.
+Loading fails if the chunks file has changed since the index was built. Searching
+fails if the query embedder differs from the build embedder. Both mistakes would
+otherwise return confident-looking, wrong results.
+
+**Token check:** with the real model, `index` counts each chunk's tokens with the bge
+tokenizer and prints a WARNING for any chunk over 512 tokens, which the model would
+silently truncate. This is the check the chunker's word limits rely on.
+
+**Tests** never load the real model: the bge wrapper is tested against a stand-in
+`sentence_transformers` module (device choice, `max_seq_length`, query prefix,
+normalization), and FAISS behavior with the hashing embedder. `faiss-cpu` and `numpy`
+are normal dependencies (small wheels, no GPU), so CI tests the real index code.
+
+## Retrieval evaluation (`retrieval/evaluate.py`, `data/eval/retrieval_questions.yaml`), Day 7
+
+**What:** `groundcheck eval-retrieval` runs every filled-in question through its
+company's index and reports recall@{1,3,5,10} and section-hit@{1,3,5,10}: overall,
+per company and per `qtype`. Per-question details (retrieved chunk IDs, rank of the
+first chunk containing gold, scores per k) are written to
+`data/eval/results/retrieval_<embedder>.json`. `--check` only verifies that every gold
+string occurs in the chunks. It needs no model, so run it right after writing
+questions.
+
+**Question file:** YAML (comments allowed, easy to hand-edit). Each entry has `id`,
+`ticker`, `qtype`, `question`, `gold_evidence` (a list of exact strings copied from
+`data/parsed/<TICKER>.txt`), an optional `gold_items`, and `notes`. Unknown keys and
+unknown qtypes are rejected, so `gold_evidnce:` fails loudly. The committed template
+has 30 empty entries (5 per labeled company, one each of numeric_lookup, table,
+multi_step, yes_no and temporal). No gold text is pre-filled: gold labels only come
+from a human.
+
+**Metrics:**
+- *recall@k*: the fraction of a question's gold strings found in at least one top-k
+  chunk, averaged over questions. Fractional, so a multi_step question that needs two
+  values and retrieves one scores 0.5. *Alternative:* "hit@k" (any gold string found)
+  would give that question full credit for half the evidence.
+- *section-hit@k*: 1 if any top-k chunk is from a gold Item section. That's `gold_items`
+  if given, otherwise the sections whose chunks contain the gold. This tells "found
+  the right part of the filing but the wrong chunk" apart from "looked in the wrong
+  place entirely".
+
+**Matching:** a chunk contains a gold string if it's a substring after collapsing all
+whitespace to single spaces on both sides (`normalize_for_match`). Case, punctuation,
+curly quotes and `|` cell separators must match exactly. That's why gold strings
+should be copied from the parsed `.txt`, which comes from the same `html_to_text`
+output the chunks do. A table row boundary counts as whitespace.
+
+**What's skipped, and why it's reported rather than scored:**
+- *unfilled* template entries (no question or no gold);
+- *unanswerable* questions (nothing to retrieve; they matter for generation, later);
+- *gold_not_in_corpus*: a gold string that occurs in none of the company's chunks.
+  That's a typo, a normalization mismatch, or a string straddling two chunks, not a
+  retrieval failure, so scoring it as 0 would understate retrieval. It's printed as a
+  WARNING and counted in `skipped`, and `--check` exits non-zero.
+
+**Testability:** `evaluate()` takes a `retrieve(ticker, question, k)` function rather
+than an index. Tests pass a fake retriever that returns chunks in a fixed order, so
+each metric can be checked by hand. The CLI test runs the whole path (parse → chunk →
+index → eval) with the hashing embedder.

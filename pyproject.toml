@@ -13,7 +13,9 @@ license = { text = "MIT" }
 # so every entry here is something the code actually imports.
 dependencies = [
     "beautifulsoup4>=4.12",
+    "faiss-cpu>=1.8",
     "lxml>=5.0",
+    "numpy>=1.26",
     "pydantic>=2.6",
     "python-dotenv>=1.0",
     "pyyaml>=6.0",
@@ -24,6 +26,11 @@ dependencies = [
 dev = [
     "pytest>=8.0",
     "ruff>=0.6",
+]
+# The real embedding model (BAAI/bge-small-en-v1.5). Pulls in PyTorch, so it is not
+# installed in CI: tests use the hashing fake embedder instead.
+embed = [
+    "sentence-transformers>=3.0",
 ]
 
 [project.scripts]

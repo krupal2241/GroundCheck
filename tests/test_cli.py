@@ -121,3 +121,60 @@ def test_chunk_before_parse_is_a_clean_error(capsys, tmp_path):
     args = ["chunk", "--config", str(_pinned_config(tmp_path)), "--parsed-dir", str(tmp_path)]
     assert main(args) == 2
     assert "run `groundcheck parse`" in capsys.readouterr().err
+
+
+def test_index_and_retrieve_commands_with_fake_embedder(capsys, tmp_path):
+    test_chunk_command(capsys, tmp_path)  # writes tmp_path/chunks/EXCO.jsonl
+    common = ["--chunks-dir", str(tmp_path / "chunks"), "--index-dir", str(tmp_path / "index")]
+    common += ["--embedder", "hashing"]
+    config = ["--config", str(_pinned_config(tmp_path))]
+    assert main(["index", *config, *common]) == 0
+    assert "hashing-256" in capsys.readouterr().out
+    assert main(["retrieve", "EXCO", "What were total net sales?", "-k", "3", *common]) == 0
+    out = capsys.readouterr().out.splitlines()
+    assert len(out) == 3 and out[0].startswith(" 1. ")
+    assert all("EXCO-" in line for line in out)
+
+
+def _write_questions(tmp_path, gold):
+    path = tmp_path / "questions.yaml"
+    path.write_text(
+        "version: 1\nquestions:\n"
+        "  - id: EXCO-01\n    ticker: EXCO\n    qtype: numeric_lookup\n"
+        "    question: What did Example Corp design and sell?\n"
+        f"    gold_evidence: ['{gold}']\n"
+        "  - {id: EXCO-02, ticker: EXCO, qtype: table}\n"
+    )
+    return path
+
+
+def test_eval_retrieval_command(capsys, tmp_path):
+    test_index_and_retrieve_commands_with_fake_embedder(capsys, tmp_path)
+    questions = _write_questions(tmp_path, "Example Corp designs and sells widgets.")
+    common = ["--chunks-dir", str(tmp_path / "chunks"), "--index-dir", str(tmp_path / "index")]
+    common += ["--embedder", "hashing", "--questions", str(questions)]
+    assert main(["eval-retrieval", *common, "--check"]) == 0
+    assert "Gold evidence check: OK" in capsys.readouterr().out
+    out_path = tmp_path / "report.json"
+    assert main(["eval-retrieval", *common, "--out", str(out_path)]) == 0
+    out = capsys.readouterr().out
+    assert "1 of 2 question(s) filled" in out
+    assert "overall" in out and "R@10" in out and "1 unfilled" in out
+    assert '"first_gold_rank"' in out_path.read_text()
+
+
+def test_eval_retrieval_check_reports_typos(capsys, tmp_path):
+    test_chunk_command(capsys, tmp_path)
+    questions = _write_questions(tmp_path, "Example Corp designs gadgets.")
+    args = ["eval-retrieval", "--chunks-dir", str(tmp_path / "chunks"), "--questions"]
+    assert main([*args, str(questions), "--check"]) == 1
+    out = capsys.readouterr().out
+    assert "WARNING: EXCO-01: gold evidence not found" in out
+
+
+def test_eval_retrieval_on_empty_template(capsys, tmp_path):
+    from groundcheck.retrieval.evaluate import DEFAULT_QUESTIONS_PATH
+
+    args = ["eval-retrieval", "--questions", str(DEFAULT_QUESTIONS_PATH)]
+    assert main([*args, "--chunks-dir", str(tmp_path), "--embedder", "hashing"]) == 1
+    assert "Nothing to evaluate yet" in capsys.readouterr().out
