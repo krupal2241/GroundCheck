@@ -83,6 +83,13 @@ accident.
 address. Config files are committed; `.env` is gitignored. `python-dotenv` loads `.env`
 but never overrides a variable you already set in your shell.
 
+**Which `.env` is read:** only `./.env` in the directory you run from, or the file
+passed with `--env-file` (`get_sec_user_agent(env_file=...)` in Python). There is no
+upward search. python-dotenv's default `find_dotenv()` searches up from the *calling
+module's* location, so it always found the repo-root `.env`, even in tests that had
+changed to an empty folder. Tests also run with the network blocked (`tests/conftest.py`),
+so none of them can reach sec.gov.
+
 ## EDGAR download (`edgar/`), Day 2
 
 **What:** three small files.
