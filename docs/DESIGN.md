@@ -284,3 +284,47 @@ never shown as reported twice.
   separate `<div>`s) aren't recognized.
 - Footers that don't mention `10-K` and aren't a bare number (e.g. only the company
   name) are kept.
+
+## Chunking (`chunking/`), Day 5
+
+**What:** `groundcheck chunk` reads `data/parsed/<TICKER>.json` and writes
+`data/chunks/<TICKER>.jsonl`, one `Chunk` per line: `chunk_id`, ticker, accession,
+`item`, `section_title`, `kind` (`prose` or `table`), `index`, `text`, `word_count`,
+and `chunker` (the chunker's name and settings, e.g. `fixed-p250-o50-t120`). These
+files are committed, so retrieval results and labels can refer to chunk IDs.
+
+**The `Chunker` interface:** a `typing.Protocol` with a `name` and
+`chunk(filing) -> list[Chunk]`. The later `TableAwareChunker` only has to match that
+shape. *Alternative:* an abstract base class. A Protocol needs no inheritance, and the
+fake or experimental chunkers in tests don't have to import anything.
+
+**`FixedSizeChunker` (the baseline):**
+- *Prose:* all non-table blocks of a section form one word stream, cut into
+  250-word windows that start every 200 words (50 words of overlap). A fact cut at one
+  window's edge is whole in the next. The last window stops at the end of the
+  section, so nothing is lost and there's no tiny duplicate tail. Prose before and
+  after a table stays in one stream, so a table doesn't leave short fragments behind.
+- *Tables:* chunked separately, split only between rows, and every piece repeats the
+  header. The header is the leading rows with an empty label cell (`| 2025 | 2024`,
+  `| Years ended December 31,`), up to 3, or else just the first row. Pieces stay
+  within 120 words. Pipes count as words, and numbers cost more tokens per word than
+  prose, which is why the limit is smaller. A single row longer than the limit becomes
+  its own piece instead of being cut.
+- *Never across sections:* each Item section is chunked on its own.
+- *Deterministic IDs:* `<TICKER>-<item>-<p|t><nnnn>` (e.g. `AAPL-7-t0003`): readable
+  in a diff or a label file, and stable as long as the parsed text and the settings
+  don't change.
+
+**Why word counts:** bge-small's limit is 512 tokens, and English prose runs about
+1.3 tokens per word, so 250 words is roughly 330 tokens, comfortably under the limit.
+The tokenizer isn't available in the sandbox, so `groundcheck index` counts real
+tokens on your machine and reports any chunk that would be truncated.
+
+**JSONL output** is written with a fixed key order and `ensure_ascii=False` (curly
+quotes stay readable), atomically via a `.part` file. Re-writing the same chunks gives
+byte-identical output, so git diffs show only real changes.
+
+*Alternatives considered:* sentence-aware splitting (needs a sentence splitter, and
+10-K sentences with "Inc." and "U.S." trip simple ones), and token-based windows
+(needs the tokenizer at chunk time, which the sandbox and CI don't have). Both can
+plug in behind the same interface later.

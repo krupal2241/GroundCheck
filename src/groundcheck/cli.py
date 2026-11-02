@@ -13,6 +13,8 @@ import sys
 from pathlib import Path
 
 from groundcheck import __version__
+from groundcheck.chunking.base import DEFAULT_CHUNKS_DIR, chunks_path, write_chunks
+from groundcheck.chunking.fixed import FixedSizeChunker
 from groundcheck.config import (
     DEFAULT_COMPANIES_PATH,
     ConfigError,
@@ -21,7 +23,7 @@ from groundcheck.config import (
 )
 from groundcheck.edgar.client import SecClient, SecRequestError
 from groundcheck.edgar.download import DEFAULT_RAW_DIR, download_all, resolve_latest_10k
-from groundcheck.parsing.filing import DEFAULT_PARSED_DIR, parse_company
+from groundcheck.parsing.filing import DEFAULT_PARSED_DIR, load_parsed, parse_company
 
 
 def cmd_resolve_filings(args: argparse.Namespace) -> int:
@@ -80,6 +82,28 @@ def cmd_parse(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_chunk(args: argparse.Namespace) -> int:
+    config = load_companies(args.config)
+    companies = [config.get(t) for t in args.only] if args.only else config.companies
+    try:
+        chunker = FixedSizeChunker(args.prose_words, args.overlap, args.table_words)
+    except ValueError as exc:
+        raise ConfigError(str(exc)) from exc
+    print(f"Chunker: {chunker.name}")
+    for company in companies:
+        chunks = chunker.chunk(load_parsed(company.ticker, args.parsed_dir))
+        path = chunks_path(company.ticker, args.chunks_dir)
+        write_chunks(chunks, path)
+        prose = [c for c in chunks if c.kind == "prose"]
+        tables = [c for c in chunks if c.kind == "table"]
+        longest = max((c.word_count for c in chunks), default=0)
+        print(
+            f"  {company.ticker:<6} {len(prose):>5} prose + {len(tables):>5} table chunks, "
+            f"longest {longest} words -> {path}"
+        )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="groundcheck",
@@ -122,6 +146,18 @@ def build_parser() -> argparse.ArgumentParser:
     parse.add_argument("--parsed-dir", type=Path, default=DEFAULT_PARSED_DIR)
     parse.add_argument("--only", nargs="+", metavar="TICKER", help="limit to tickers")
     parse.set_defaults(func=cmd_parse)
+
+    chunk = subparsers.add_parser(
+        "chunk", help="chunk parsed sections (data/parsed -> data/chunks/<TICKER>.jsonl)"
+    )
+    chunk.add_argument("--config", type=Path, default=DEFAULT_COMPANIES_PATH)
+    chunk.add_argument("--parsed-dir", type=Path, default=DEFAULT_PARSED_DIR)
+    chunk.add_argument("--chunks-dir", type=Path, default=DEFAULT_CHUNKS_DIR)
+    chunk.add_argument("--only", nargs="+", metavar="TICKER", help="limit to tickers")
+    chunk.add_argument("--prose-words", type=int, default=250)
+    chunk.add_argument("--overlap", type=int, default=50)
+    chunk.add_argument("--table-words", type=int, default=120)
+    chunk.set_defaults(func=cmd_chunk)
     return parser
 
 
