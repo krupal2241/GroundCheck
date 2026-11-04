@@ -24,6 +24,7 @@ from groundcheck.chunking.base import (
 from groundcheck.chunking.fixed import DEFAULT_MAX_TOKENS, FixedSizeChunker
 from groundcheck.config import (
     DEFAULT_COMPANIES_PATH,
+    REPO_ROOT,
     ConfigError,
     get_sec_user_agent,
     load_companies,
@@ -521,6 +522,29 @@ def cmd_build_training_data(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_report(args: argparse.Namespace) -> int:
+    from groundcheck.report.build import build_report
+
+    outcome = build_report(
+        args.results_dir,
+        args.retrieval_results_dir,
+        readme=args.readme,
+        docs_dir=args.docs_dir,
+        labels_path=args.labels,
+        candidates_dir=args.candidates_dir,
+    )
+    for item in outcome.missing:
+        print(f"MISSING: {item}")
+    for message in outcome.messages:
+        print(message)
+    print(
+        f"Wrote {outcome.results_md}"
+        + (f" and {len(outcome.figures)} chart(s)" if outcome.figures else "")
+    )
+    print("README.md results section " + ("updated." if outcome.readme_updated else "NOT changed."))
+    return 0
+
+
 def cmd_pipeline(args: argparse.Namespace) -> int:
     from groundcheck.pipeline.runner import (
         DRY_RUN_DIR,
@@ -887,6 +911,20 @@ def build_parser() -> argparse.ArgumentParser:
         help="every chunk retrieved for a candidate is excluded as well",
     )
     training.set_defaults(func=cmd_build_training_data)
+
+    report = subparsers.add_parser(
+        "report",
+        help="regenerate README results, docs/RESULTS.md and charts from the result files",
+    )
+    report.add_argument("--results-dir", type=Path, default=DEFAULT_RESULTS_DIR)
+    report.add_argument(
+        "--retrieval-results-dir", type=Path, default=DEFAULT_QUESTIONS_PATH.parent / "results"
+    )
+    report.add_argument("--readme", type=Path, default=REPO_ROOT / "README.md")
+    report.add_argument("--docs-dir", type=Path, default=REPO_ROOT / "docs")
+    report.add_argument("--labels", type=Path, default=DEFAULT_LABELS_PATH)
+    report.add_argument("--candidates-dir", type=Path, default=DEFAULT_CANDIDATES_DIR)
+    report.set_defaults(func=cmd_report)
 
     from groundcheck.generation.modes import MODES
     from groundcheck.pipeline.runner import DEFAULT_VERIFIERS, STAGES

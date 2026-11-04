@@ -123,8 +123,14 @@ def test_dry_run_with_a_label_runs_the_evaluation_stages(ctx):
             confirmed=True,
         )
     )
-    result = statuses(run_pipeline(ctx, start="export-labels", end="error-report"))
-    assert result == {"export-labels": "ran", "eval-verifiers": "ran", "error-report": "ran"}
+    result = statuses(run_pipeline(ctx, start="export-labels"))
+    assert result == {
+        "export-labels": "ran",
+        "eval-verifiers": "ran",
+        "error-report": "ran",
+        "report": "ran",
+    }
+    assert "| fake |" in (ctx.paths.docs / "RESULTS.md").read_text()
     report = json.loads((ctx.paths.results / "verifier_eval.json").read_text())
     assert "fake" in json.dumps(report)
     assert (ctx.paths.results / "error_report.md").is_file()

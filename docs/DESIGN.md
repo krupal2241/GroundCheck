@@ -1372,3 +1372,50 @@ job runs `pytest --cov=groundcheck --cov-report=term`, then prints the total per
 (also in the job summary) in a step marked `continue-on-error`. There is no
 `--cov-fail-under`, so coverage is reported, never enforced (93% when this was written).
 **LICENSE:** MIT, matching `pyproject.toml`; none existed before.
+
+## Automatic results report (`report/build.py`, `groundcheck report`), Overnight Part 5
+
+**What:** `groundcheck report` reads `results/verifier_eval.json` (written by
+`eval-verifiers`), every `data/eval/results/*.json` (written by `eval-retrieval`, one
+per embedder), and the label file with the candidates, and regenerates:
+
+- `docs/RESULTS.md`, in full: the retrieval table (recall@k and section-hit@k per
+  embedder), the verifier comparison (accuracy, macro-F1, supported-vs-not accuracy,
+  latency p50 and p95, cost per 1,000 checks), accuracy by edge case, by generation
+  mode and by company (one column per verifier, with n), a confusion matrix and a
+  per-class precision/recall/F1 table per verifier, the charts, and the gold set's class
+  balance by mode;
+- the README section between `<!-- RESULTS:START -->` and `<!-- RESULTS:END -->`
+  (retrieval and verifier tables plus a link to RESULTS.md);
+- the class-balance table between `<!-- BALANCE:START -->` / `<!-- BALANCE:END -->` in
+  `docs/DATASET_CARD.md`, from confirmed, valid labels only;
+- `docs/figures/accuracy_vs_latency.png` (one point per verifier, latency on a log
+  axis, direct labels plus a legend) and `docs/figures/edge_case_accuracy.png` (grouped
+  bars per edge-case tag, n under each tag).
+
+**Never inventing numbers:** every cell comes from a result file. A missing file is
+listed as `MISSING: ... run <command>` on the console and as "Not run yet" in
+RESULTS.md, never as a number. *Decision:* the README section is replaced only when
+**both** the retrieval and the verifier results exist; with either missing, the README
+is left byte-for-byte untouched (a test checks this), so a half-run never replaces the
+README's TBD placeholders with a half-empty table. RESULTS.md is always regenerated,
+because it says plainly what is missing. If the README has no markers it is not
+touched either. The replacement is idempotent, so re-running gives the same file.
+
+**Cost column:** "$0 (local)" for every verifier that ran locally (all built-in ones).
+A hosted model appears only if `config/prices.yaml` lists one, as a row named "hosted
+judge (estimate only, not run)" whose metric cells say "not run" and whose cost cell
+says "~X USD (estimate)". The estimate itself is the arithmetic `eval-verifiers`
+already did and labeled; the report only copies it.
+
+**Charts:** matplotlib is in a new `[report]` extra and imported only when charts are
+drawn, with the non-interactive Agg backend. Without it the charts are skipped with a
+message and every table is still written. Colors are the dataviz skill's validated
+categorical order on a near-white surface; grid and axes are recessive, there is one
+y-axis per chart, and identity is never color-only (direct labels on the scatter, a
+legend and n-labels on the bars). Tests drive the chart code through a stand-in
+`pyplot` that records calls, so CI needs no matplotlib; the real rendering was checked
+by eye in a scratch environment with synthetic numbers that were not committed.
+
+**In the pipeline:** the `report` stage runs it with the same paths (scratch paths in
+a dry run, where the scratch README doesn't exist, so it is never touched).
