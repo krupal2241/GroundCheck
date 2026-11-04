@@ -15,6 +15,16 @@ short line repeated many times in the filing (JPM prints "Management's discussio
 analysis" at the top of every MD&A page; XOM prints "MANAGEMENT'S DISCUSSION AND
 ANALYSIS OF FINANCIAL CONDITION AND RESULTS OF OPERATIONS" every 20 to 40 lines). The
 first occurrence that is a genuine heading, i.e. followed by prose, is kept.
+
+Some short lines repeat because they are *content*, not furniture, and every copy of
+them is kept (`protected_reason`):
+
+- a scale or unit caption: contains "million", "billion", "thousand", "dollars" or
+  "except per share" (XOM's "(millions of dollars)" above each table);
+- a line that starts with a lowercase letter: the tail of a sentence that a page or
+  table break cut off (JPM's "partially offset by");
+- a year-comparison heading: "2025 versus 2024", "2025 compared with 2024";
+- a bare footnote marker: "(1)", "(a)", "(iv)", "*".
 """
 
 import logging
@@ -39,6 +49,14 @@ MIN_REPEATS = 8
 PROSE_LOOKAHEAD_BLOCKS = 4
 MIN_PROSE_CHARS = 100
 MIN_PROSE_WORDS = 15
+# Repeated lines that are content, never furniture (see the module docstring).
+SCALE_WORDS = ("million", "billion", "thousand", "dollars", "except per share")
+YEAR_COMPARISON_RE = re.compile(
+    r"^(?:fiscal\s+)?(?:19|20)\d{2}\s+(?:versus|vs\.?|compared\s+(?:with|to))\s+"
+    r"(?:fiscal\s+)?(?:19|20)\d{2}\b",
+    re.IGNORECASE,
+)
+FOOTNOTE_MARKER_RE = re.compile(r"^(?:\(\s*(?:\d{1,2}|[a-z]|[ivx]{1,5})\s*\)|\*{1,3})$", re.I)
 TOC_ROW_RE = re.compile(r"\|\s*(?:page\s+)?(\d{1,3})(?:\s*[-–—]\s*\d{1,3})?\s*$", re.IGNORECASE)
 
 logger = logging.getLogger(__name__)
@@ -118,18 +136,53 @@ def _repeat_eligible(block: str) -> bool:
     )
 
 
+def protected_reason(block: str) -> str | None:
+    """Why a repeated line must be kept in every copy, or None if it may be removed."""
+    line = block.strip()
+    if not line:
+        return None
+    lowered = line.casefold()
+    if any(word in lowered for word in SCALE_WORDS):
+        return "scale or unit caption"
+    if line[0].isalpha() and line[0].islower():
+        return "starts lowercase (sentence continuation)"
+    if YEAR_COMPARISON_RE.match(line):
+        return "year-comparison heading"
+    if FOOTNOTE_MARKER_RE.match(line):
+        return "footnote marker"
+    return None
+
+
 def remove_repeated_lines(text: str, label: str = "filing") -> tuple[str, int]:
     """Drop short lines repeated `MIN_REPEATS`+ times (running page headers).
 
     Lines are compared case-insensitively, ignoring surrounding whitespace. For each
     repeated line, the first occurrence that is followed by prose (a genuine heading)
     is kept; every other occurrence is removed. Item headings and tables are never
-    touched. Returns the text and the number of lines removed; each removed line and
-    its count are logged at INFO level (`groundcheck -v parse`).
+    touched, and neither is any line that `protected_reason` says is content: if any
+    copy of a repeated line is protected, every copy is kept. Returns the text and the
+    number of lines removed; each removed line and its count are logged at INFO level
+    (`groundcheck -v parse`), each line kept because it is protected at DEBUG.
     """
     blocks = text.split(BLOCK_SEPARATOR)
     counts = Counter(_line_key(b) for b in blocks if _repeat_eligible(b))
     repeated = {key for key, n in counts.items() if n >= MIN_REPEATS}
+    protected: dict[str, str] = {}  # repeated line -> why every copy is kept
+    for block in blocks:
+        key = _line_key(block)
+        if key in repeated and key not in protected and _repeat_eligible(block):
+            reason = protected_reason(block)
+            if reason:
+                protected[key] = reason
+    for key in sorted(protected):
+        logger.debug(
+            "%s: kept repeated line %r (%d times): protected, %s",
+            label,
+            key,
+            counts[key],
+            protected[key],
+        )
+    repeated -= protected.keys()
     if not repeated:
         return text, 0
 

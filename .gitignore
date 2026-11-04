@@ -24,6 +24,8 @@ venv/
 data/raw/
 data/parsed/
 data/index/
+# LLM response cache and dry-run output (re-creatable).
+data/cache/
 
 # OS / editor
 .DS_Store

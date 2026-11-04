@@ -168,3 +168,45 @@ def get_sec_user_agent(env_file: Path | None = None) -> str:
     if not USER_AGENT_RE.match(value):
         raise ConfigError(f'SEC_USER_AGENT={value!r} should look like "Your Name you@example.com".')
     return value
+
+
+# --- LLM settings (config/llm.yaml) ---------------------------------------------------
+
+DEFAULT_LLM_CONFIG_PATH = REPO_ROOT / "config" / "llm.yaml"
+
+
+class LLMConfig(BaseModel):
+    """Which local model generates candidates, and how. `--model` overrides `model`."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    provider: Literal["ollama", "hf-local", "fake"] = "ollama"
+    model: str = "llama3.2:3b"  # the Ollama model; 3B fits an 8 GB MacBook Air
+    hf_model: str = "Qwen/Qwen2.5-3B-Instruct"  # used when provider is hf-local
+    ollama_url: str = "http://localhost:11434"
+    temperature: float = Field(default=0.0, ge=0.0, le=2.0)
+    seed: int = 42
+    max_tokens: int = Field(default=768, gt=0)
+    context_window: int = Field(default=8192, ge=512)  # Ollama num_ctx
+    timeout_s: float = Field(default=300.0, gt=0)
+    json_max_attempts: int = Field(default=3, ge=1, le=10)
+    cache_dir: str = "data/cache/llm"  # relative to the repo root
+    top_k: int = Field(default=5, ge=1, le=50)  # chunks retrieved per question
+
+    @property
+    def cache_path(self) -> Path:
+        path = Path(self.cache_dir)
+        return path if path.is_absolute() else REPO_ROOT / path
+
+
+def load_llm_config(path: Path | None = None) -> LLMConfig:
+    """Read config/llm.yaml (or `path`). A missing default file means all defaults."""
+    target = Path(path) if path is not None else DEFAULT_LLM_CONFIG_PATH
+    if not target.is_file():
+        if path is not None:
+            raise ConfigError(f"LLM config file not found: {target}")
+        return LLMConfig()
+    try:
+        return LLMConfig.model_validate(yaml.safe_load(target.read_text()) or {})
+    except ValidationError as exc:
+        raise ConfigError(f"invalid LLM config {target}:\n{exc}") from exc

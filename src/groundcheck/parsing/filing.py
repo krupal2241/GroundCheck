@@ -17,7 +17,11 @@ from groundcheck.edgar.download import DEFAULT_RAW_DIR, filing_path
 from groundcheck.parsing.cleanup import remove_page_furniture, remove_repeated_lines
 from groundcheck.parsing.html_text import html_to_text
 from groundcheck.parsing.recovery import recover_cross_reference_layout
-from groundcheck.parsing.sections import check_section_sizes, split_sections
+from groundcheck.parsing.sections import (
+    check_section_sizes,
+    section_size_warning,
+    split_sections,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -54,21 +58,28 @@ def parse_html(company: Company, html: bytes) -> tuple[ParsedFiling, str]:
     """Parse one filing's HTML. Returns the parsed filing and the full cleaned text.
 
     Steps: HTML → text, page furniture and repeated running headers removed, Item
-    split, size checks, then cross-reference layout recovery. Size warnings describe
-    the split as found; after a recovery the sizes are checked again and any new
-    problem is added, so a warning is never silently dropped.
+    split, size checks, then cross-reference layout recovery.
+
+    Size warnings are only emitted once recovery has run. If it succeeded, the stub and
+    oversized warnings for the sections it rebuilt are dropped (its NOTE lines say what
+    happened instead), and the recovered sections are size-checked again so any problem
+    left over is still reported. If recovery failed or didn't apply, every size warning
+    from the split fires, plus recovery's own give-up warning.
     """
     label = company.ticker
     text, removed = remove_page_furniture(html_to_text(html))
     text, header_lines = remove_repeated_lines(text, label=label)
     result = split_sections(text, label=label)
     warnings = list(result.warnings)
-    for message in check_section_sizes(result.sections):
-        logger.warning("%s: %s", label, message)
-        warnings.append(message)
     recovery = recover_cross_reference_layout(result.sections, label=label, full_text=text)
-    warnings.extend(recovery.warnings)
-    if recovery.notes:
+    fixed = set(recovery.fixed_items)
+    for section in result.sections:
+        message = section_size_warning(section)
+        if message and section.item not in fixed:
+            logger.warning("%s: %s", label, message)
+            warnings.append(message)
+    warnings.extend(recovery.warnings)  # already logged by recovery
+    if recovery.fixed_items:
         for message in check_section_sizes(recovery.sections):
             if message not in warnings:
                 logger.warning("%s: %s", label, message)

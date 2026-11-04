@@ -188,23 +188,26 @@ def is_oversized(section: Section) -> bool:
     return not is_key_section(section) and len(section.text) > MAX_OTHER_SECTION_CHARS
 
 
+def section_size_warning(section: Section) -> str | None:
+    """The warning for a stub-sized key Item or an oversized other Item, else None."""
+    n = len(section.text)
+    if is_stub(section):
+        return (
+            f"{section.label} is only {n:,} characters (expected at least "
+            f"{MIN_KEY_SECTION_CHARS:,}); probably a cross-reference stub"
+        )
+    if is_oversized(section):
+        return (
+            f"{section.label} has {n:,} characters (expected at most "
+            f"{MAX_OTHER_SECTION_CHARS:,} outside Items {', '.join(KEY_ITEMS)}); "
+            "it probably contains other Items' text"
+        )
+    return None
+
+
 def check_section_sizes(sections: list[Section]) -> list[str]:
     """Warnings for stub-sized key Items and oversized other Items (not logged here)."""
-    warnings = []
-    for section in sections:
-        n = len(section.text)
-        if is_stub(section):
-            warnings.append(
-                f"{section.label} is only {n:,} characters (expected at least "
-                f"{MIN_KEY_SECTION_CHARS:,}); probably a cross-reference stub"
-            )
-        elif is_oversized(section):
-            warnings.append(
-                f"{section.label} has {n:,} characters (expected at most "
-                f"{MAX_OTHER_SECTION_CHARS:,} outside Items {', '.join(KEY_ITEMS)}); "
-                "it probably contains other Items' text"
-            )
-    return warnings
+    return [w for s in sections if (w := section_size_warning(s))]
 
 
 def _pick(candidates: list[_Candidate], warnings: list[str]) -> list[_Candidate]:

@@ -1,0 +1,19 @@
+# Local LLM settings for candidate generation ($0 policy: local models only).
+#
+# provider: ollama (default, on your Mac), hf-local (Colab GPU, needs the [hf] extra),
+#           or fake (offline stand-in; what --dry-run uses).
+# Any provider marked as paid is refused unless --allow-paid is passed. None exists yet.
+# --model on the command line overrides `model` (or `hf_model` for hf-local).
+
+provider: ollama
+model: llama3.2:3b               # 3B fits the 8 GB MacBook Air comfortably
+hf_model: Qwen/Qwen2.5-3B-Instruct
+ollama_url: http://localhost:11434
+temperature: 0.0                 # deterministic decoding
+seed: 42                         # fixed, recorded in every response's metadata
+max_tokens: 768
+context_window: 8192           # Ollama num_ctx; its 2,048 default would cut the passages
+timeout_s: 300
+json_max_attempts: 3             # structured output: first try + 2 retries
+cache_dir: data/cache/llm        # gitignored; keyed by provider, model, digest, params
+top_k: 5                         # chunks retrieved per question
