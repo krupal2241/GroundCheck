@@ -1319,3 +1319,56 @@ distributions and not only agreement:* agreement alone can't tell anchoring from
 verifier; a shift in the label mix between assisted and blind labels of similar
 candidates can. With one annotator and small numbers it is a warning light, not a test.
 The risk and the rules for using `--suggest` are in `docs/labeling_guide.md`.
+
+## One-command pipeline and reproducibility (`pipeline/`, Makefile, pre-commit, CI coverage), Overnight Part 4
+
+**`groundcheck pipeline`** runs download, parse, chunk, index, eval-retrieval,
+generate (all three modes by default, `--modes` to choose), export-labels,
+eval-verifiers (`--verifiers`, default prompted, hhem, minicheck), error-report and
+report, in that order; `--from` and `--to` pick a contiguous range, `--list` prints the
+stages. Each stage calls the same entry point as its standalone command (the CLI's
+`main`, or `generate_candidates.py`'s `main`), so there is exactly one implementation of
+every step and the pipeline can't drift from the documented commands.
+
+**Skipping unchanged stages:** a stage's fingerprint is the sha256 over its settings
+(e.g. embedder, tokenizer, modes), a stage version, and the relative path and sha256 of
+every file under its inputs (input directories are walked; `.part` files ignored). After
+a stage succeeds the fingerprint is stored in `data/cache/pipeline/<stage>.json`
+(gitignored) with its outputs. Next time, if the fingerprint matches and every output
+still exists, the stage prints "skipped (inputs unchanged since the last successful
+run)". Because the inputs of one stage are the outputs of the one before, a stage that
+re-runs and writes byte-identical output (say, re-parsing an unchanged filing) leaves
+everything downstream skipped. A failed stage stops the run, stores nothing, and marks
+the rest "not run". `--force` ignores stored fingerprints. *Why content hashes and not
+modification times (make-style):* `git checkout` and Colab round-trips rewrite mtimes
+without changing content, and a timestamp says nothing about whether a model or setting
+changed. *Why no DAG library (Snakemake, DVC, Prefect):* ten stages in a fixed order fit
+in one file, and each extra tool is something to install and explain.
+*Caveats:* generate is resumable on its own (it skips existing candidate IDs), so its
+fingerprint only decides whether to call it at all; the LLM is not an input file, so
+after pulling a new model use `--force --from generate` (the LLM cache key includes the
+model digest, so nothing stale is reused). A stage with no input (no label file yet, no
+gold labels, no predictions) reports "nothing to do" and is not stored, so it runs as
+soon as the input appears. Labels are never created by the pipeline.
+
+**`--dry-run`** writes only under `data/cache/dry-run/pipeline/` (or `--scratch-dir`)
+and uses fakes for everything that needs the network or a model: `FakeSecClient` serves
+a synthetic 10-K per company, built from that company's committed chunks (an Item 1,
+1A, 7 and 8 heading each followed by up to six of its own paragraphs and tables, and a
+note saying it is synthetic), so parse, chunk and index run on realistic text;
+chunking uses no tokenizer limit (no bge tokenizer offline), indexing and retrieval the
+hashing embedder, generation the fake LLM, evaluation the fake verifier. The real label
+file is never read in a dry run (its claim IDs wouldn't match the fake candidates); a
+dry-run label file in the scratch directory is used if one exists. A full dry run takes
+about two seconds and is what the tests run.
+
+**Makefile:** `make help` lists the targets; each is a one-line wrapper over a
+documented command (`install`, `dev`, `lint`, `format`, `test`, `coverage`, `dry-run`,
+`pipeline`, `generate` in all modes with cool-down batches, `label-plan`, `label`,
+`label-stats`, `report`, `demo`, `precommit`, `clean-cache`). **pre-commit**
+(`.pre-commit-config.yaml`): ruff with `--fix` and ruff-format, pinned to v0.17.3, the
+version used here. **CI coverage:** `pytest-cov` joined the `[dev]` extra and the test
+job runs `pytest --cov=groundcheck --cov-report=term`, then prints the total percentage
+(also in the job summary) in a step marked `continue-on-error`. There is no
+`--cov-fail-under`, so coverage is reported, never enforced (93% when this was written).
+**LICENSE:** MIT, matching `pyproject.toml`; none existed before.

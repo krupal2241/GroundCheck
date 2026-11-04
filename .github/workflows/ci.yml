@@ -34,4 +34,12 @@ jobs:
       # Only the dev extra: tests use fake embedders/LLMs and never download
       # models or contact SEC, so CI stays fast and offline-safe.
       - run: pip install -e ".[dev]"
-      - run: pytest -q
+      # Coverage is reported, never enforced: no --cov-fail-under, so it can't fail the build.
+      - run: pytest -q --cov=groundcheck --cov-report=term
+      - name: Coverage percentage
+        if: always()
+        continue-on-error: true
+        run: |
+          total=$(coverage report --format=total)
+          echo "Coverage (Python ${{ matrix.python-version }}): ${total}%"
+          echo "Coverage (Python ${{ matrix.python-version }}): ${total}%" >> "$GITHUB_STEP_SUMMARY"

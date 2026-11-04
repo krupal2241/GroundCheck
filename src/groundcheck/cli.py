@@ -521,6 +521,38 @@ def cmd_build_training_data(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_pipeline(args: argparse.Namespace) -> int:
+    from groundcheck.pipeline.runner import (
+        DRY_RUN_DIR,
+        STAGES,
+        Context,
+        Options,
+        Paths,
+        format_summary,
+        run_pipeline,
+    )
+
+    if args.list:
+        print("Stages, in order: " + " -> ".join(STAGES))
+        return 0
+    paths = Paths.dry_run(args.scratch_dir or DRY_RUN_DIR) if args.dry_run else Paths()
+    options = Options(
+        dry_run=args.dry_run,
+        force=args.force,
+        modes=tuple(args.modes),
+        verifiers=tuple(args.verifiers),
+        embedder=args.embedder,
+        tokenizer=args.tokenizer,
+        device=args.device,
+        generate_args=tuple(args.generate_arg or ()),
+    )
+    where = f"scratch directory {paths.raw.parent}" if args.dry_run else "the repository"
+    print(f"Pipeline ({'DRY RUN, fakes only' if args.dry_run else 'real'}), writing to {where}")
+    result = run_pipeline(Context(paths, options), args.from_stage, args.to_stage)
+    print(format_summary(result))
+    return 0 if result.ok else 1
+
+
 def add_verifier_options(parser: argparse.ArgumentParser) -> None:
     """Options for building verifiers (and the prompted verifier's LLM)."""
     add_llm_options(parser)
@@ -855,6 +887,42 @@ def build_parser() -> argparse.ArgumentParser:
         help="every chunk retrieved for a candidate is excluded as well",
     )
     training.set_defaults(func=cmd_build_training_data)
+
+    from groundcheck.generation.modes import MODES
+    from groundcheck.pipeline.runner import DEFAULT_VERIFIERS, STAGES
+
+    pipeline = subparsers.add_parser(
+        "pipeline",
+        help="run every stage (download ... report), skipping stages whose inputs are unchanged",
+    )
+    pipeline.add_argument("--from", dest="from_stage", choices=STAGES, default=None)
+    pipeline.add_argument("--to", dest="to_stage", choices=STAGES, default=None)
+    pipeline.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="offline: fake SEC client, hashing embedder, fake LLM and verifier; writes "
+        "only to a scratch directory",
+    )
+    pipeline.add_argument(
+        "--scratch-dir", type=Path, default=None, help="dry run output (default data/cache/...)"
+    )
+    pipeline.add_argument("--force", action="store_true", help="re-run even unchanged stages")
+    pipeline.add_argument("--list", action="store_true", help="list the stages and exit")
+    pipeline.add_argument("--modes", nargs="+", choices=MODES, default=list(MODES))
+    pipeline.add_argument(
+        "--verifiers", nargs="+", choices=VERIFIER_NAMES, default=list(DEFAULT_VERIFIERS)
+    )
+    pipeline.add_argument("--embedder", choices=["bge-small", "hashing"], default="bge-small")
+    pipeline.add_argument("--tokenizer", choices=["bge-small", "none"], default="bge-small")
+    pipeline.add_argument("--device", default=None)
+    pipeline.add_argument(
+        "--generate-arg",
+        action="append",
+        metavar="ARG",
+        help="extra argument for generate_candidates.py, e.g. --generate-arg=--limit "
+        "--generate-arg=5 (repeatable)",
+    )
+    pipeline.set_defaults(func=cmd_pipeline)
     return parser
 
 
