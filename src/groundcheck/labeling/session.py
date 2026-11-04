@@ -24,7 +24,14 @@ from dataclasses import dataclass
 
 from pydantic import ValidationError
 
-from groundcheck.labeling.schema import EDGE_CASES, EvidenceSpan, LabelRecord, make_span
+from groundcheck.labeling.assist import LabelSuggester, LabelSuggestion, suggest_span
+from groundcheck.labeling.schema import (
+    EDGE_CASES,
+    Assistance,
+    EvidenceSpan,
+    LabelRecord,
+    make_span,
+)
 from groundcheck.labeling.store import ClaimItem, LabelStore
 from groundcheck.retrieval.evaluate import normalize_for_match
 
@@ -53,8 +60,13 @@ class Labeler:
         input_fn: Callable[[str], str] | None = None,
         output: Callable[[str], None] | None = None,
         now: Callable[[], str] | None = None,
+        suggest_evidence: bool = True,
+        label_suggester: LabelSuggester | None = None,
     ):
         self.store = store
+        self.suggest_evidence = suggest_evidence
+        # OFF unless `--suggest` is given: a shown label can anchor the annotator.
+        self.label_suggester = label_suggester
         # Looked up at call time, so tests can patch builtins.input / print.
         self.input_fn = input_fn or (lambda prompt: input(prompt))
         self.out = output or (lambda text: print(text))
@@ -124,16 +136,32 @@ class Labeler:
 
     # --- questions --------------------------------------------------------------------
 
-    def ask_evidence(self, item: ClaimItem) -> list[EvidenceSpan]:
+    def ask_evidence(self, item: ClaimItem, assistance: Assistance) -> list[EvidenceSpan]:
         spans: list[EvidenceSpan] = []
         retrieved = item.candidate.retrieved
+        suggestion = suggest_span(item.claim.text, retrieved) if self.suggest_evidence else None
+        if suggestion:
+            assistance.evidence_suggested = True
+            self.out(
+                f"SUGGESTED EVIDENCE from [{suggestion.rank}] {suggestion.span.chunk_id} "
+                f"(covers {suggestion.score:.0%} of the claim's numbers and words):"
+            )
+            self.out(f"      {suggestion.span.text}")
         while True:
             prompt = (
                 "Paste an evidence span from the chunks, then Enter on an empty line"
                 if not spans
                 else "Paste another span, or just Enter to finish"
             )
+            if suggestion and not spans:
+                prompt += " (or a + Enter to accept the suggestion)"
             text = self.ask_block(prompt + ":")
+            if suggestion and not spans and text.lower() == "a":
+                spans.append(suggestion.span)
+                assistance.evidence_accepted = True
+                self.out(f"  OK: {suggestion.span.chunk_id} [{suggestion.span.start}:"
+                         f"{suggestion.span.end}] (suggestion accepted)")  # fmt: skip
+                continue
             if not text:
                 if spans:
                     return spans
@@ -174,7 +202,7 @@ class Labeler:
                 return answer
             self.out("  Type a number from the list, or Enter for none.")
 
-    def mark_invalid(self, item: ClaimItem) -> str:
+    def mark_invalid(self, item: ClaimItem, assistance: Assistance) -> str:
         reason = self.ask("Why is this claim invalid? (e.g. fragment, duplicate): ")
         c = item.candidate
         record = LabelRecord(
@@ -188,15 +216,36 @@ class Labeler:
             confirmed=True,
             note=reason,
             labeled_at=self.now(),
+            assistance=assistance,
         )
         self.store.put(record)
         self.out("  Saved: invalid claim (not labeled, never exported)")
         return "invalid"
 
+    def show_label_suggestion(self, item: ClaimItem) -> LabelSuggestion | None:
+        if self.label_suggester is None:
+            return None
+        suggestion = self.label_suggester(item.claim.text, item.candidate.retrieved)
+        if suggestion is None:
+            self.out("SUGGESTED LABEL: unavailable (the verifier failed on this claim)")
+            return None
+        self.out(
+            f"SUGGESTED LABEL ({suggestion.verifier}): {suggestion.label} "
+            f"(P(supported) {suggestion.score:.2f}). Judge for yourself; it is often wrong."
+        )
+        return suggestion
+
     def label_one(self, item: ClaimItem) -> str:
         """Returns 'labeled', 'invalid', 'kept' or 'skipped'; raises Quit."""
         existing = self.store.get(item.claim.claim_id)
         keep = "  Enter=keep" if existing else ""
+        suggested = self.show_label_suggestion(item)
+        assistance = Assistance(
+            label_suggestion_shown=suggested is not None,
+            suggested_label=suggested.label if suggested else None,
+            suggestion_verifier=suggested.verifier if suggested else None,
+            suggestion_score=suggested.score if suggested else None,
+        )
         while True:
             key = self.ask(
                 "Label? s=supported c=contradicted u=unsupported  x=invalid claim  "
@@ -208,14 +257,16 @@ class Labeler:
             if key == "k":
                 return "skipped"
             if key == "x":
-                return self.mark_invalid(item)
+                return self.mark_invalid(item, assistance)
             if not key and existing:
                 return "kept"
             if key in LABEL_KEYS:
                 break
             self.out("  Type s, c, u, x, k or q.")
         label = LABEL_KEYS[key]
-        evidence = self.ask_evidence(item) if label != "unsupported" else []
+        evidence = self.ask_evidence(item, assistance) if label != "unsupported" else []
+        if assistance.label_suggestion_shown:
+            assistance.agreed = label == assistance.suggested_label
         while True:
             edge_case = self.ask_edge_case()
             if edge_case == "absent_evidence" and label != "unsupported":
@@ -240,6 +291,7 @@ class Labeler:
                     "confirmed": confirmed,
                     "note": note,
                     "labeled_at": self.now(),
+                    "assistance": assistance.model_dump(),
                 },
                 context={"chunks": item.chunks},
             )

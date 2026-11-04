@@ -1282,3 +1282,40 @@ is the proxy. `label-stats` shows how well that worked.
 **`label-stats`** now adds counts by mode and three cross-tables: mode x label, company
 x label, question type x label, so the class balance per mode is visible after each
 session.
+
+## Labeling assistance (`labeling/assist.py`), Overnight Part 3
+
+**Evidence-span suggestion:** for each claim, every retrieved chunk is cut into units
+with the verifiers' own splitter (`verify.spans.units`: one unit per table row, one per
+sentence in prose) and scored with the same lexical overlap the cross-encoder verifiers
+use to cite spans (share of the claim's numbers x3 plus content words). The best unit
+over all chunks is offered (ties: better-ranked chunk, then the shorter unit, then the
+earlier one). Before it is shown it goes through `make_span` and is checked to sit at
+its offsets in the normalized chunk text, the same exact-substring rule the gold schema
+enforces, so accepting it can never produce an invalid label. `a` + Enter accepts it;
+pasting a span works as before. *Decision: on by default, shown only after the label
+key.* It is a search aid, not an opinion: at that point the annotator has already said
+supported or contradicted, so it can only change which span is cited, and that is
+recorded (`evidence_suggested`, `evidence_accepted`). `--no-evidence-suggest` turns it
+off. *Why not let the annotator accept a suggestion before choosing the label:* a
+highlighted row that looks right is itself a nudge towards "supported".
+
+**Label suggestion (`groundcheck label --suggest VERIFIER`):** any verifier from
+`make_verifier` (fake, prompted, minicheck, hhem, finetuned) is run on the claim and the
+candidate's retrieved chunks, and its label and P(supported) are shown before the label
+prompt. *OFF by default*, because showing a label anchors the annotator; the test set
+would then partly measure agreement with that verifier. *Local only:*
+`VerifierOptions(allow_paid=False)` is hard-coded on this path, and the command has no
+`--allow-paid` option. A verifier error shows "unavailable" and records no suggestion.
+
+**What is recorded:** every label saved by the tool has an `assistance` object:
+`evidence_suggested`, `evidence_accepted`, `label_suggestion_shown`, `suggested_label`,
+`suggestion_verifier`, `suggestion_score`, and `agreed` (final label equals the
+suggestion; null when none was shown or the claim was marked invalid). Labels written
+before this part have no `assistance` and count as "no suggestion shown". `label-stats`
+prints the agreement rate, a per-verifier count, the label distribution with vs without
+suggestions side by side, and the evidence-suggestion acceptance rate. *Why compare
+distributions and not only agreement:* agreement alone can't tell anchoring from a good
+verifier; a shift in the label mix between assisted and blind labels of similar
+candidates can. With one annotator and small numbers it is a warning light, not a test.
+The risk and the rules for using `--suggest` are in `docs/labeling_guide.md`.

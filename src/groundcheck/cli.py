@@ -286,7 +286,26 @@ def cmd_label(args: argparse.Namespace) -> int:
     done = sum(store.get(i.claim.claim_id) is not None for i in items)
     print(f"{len(items)} claim(s) in {len(candidates)} candidate(s); {done} already labeled.")
     print("Paste evidence exactly as shown; finish a paste with an empty line. q quits.")
-    Labeler(store).run(items, only_unlabeled=args.only_unlabeled)
+    suggester = None
+    if args.suggest:
+        from groundcheck.labeling.assist import verifier_suggester
+
+        # Local models only: allow_paid is never passed through here.
+        options = VerifierOptions(
+            llm_config=args.llm_config,
+            allow_paid=False,
+            device=args.device,
+            finetuned_path=args.finetuned_path,
+        )
+        suggester = verifier_suggester(make_verifier(args.suggest, options))
+        print(
+            f"Label suggestions ON ({args.suggest}). Each label records what was suggested "
+            "and whether you agreed; see docs/labeling_guide.md on anchoring."
+        )
+    labeler = Labeler(
+        store, suggest_evidence=not args.no_evidence_suggest, label_suggester=suggester
+    )
+    labeler.run(items, only_unlabeled=args.only_unlabeled)
     return 0
 
 
@@ -690,6 +709,21 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="walk through exactly the candidates of a plan from `groundcheck label-plan`",
     )
+    label.add_argument(
+        "--suggest",
+        choices=VERIFIER_NAMES,
+        default=None,
+        help="show this local verifier's proposed label before you decide (OFF by "
+        "default: a suggestion can anchor you; every label records whether one was shown)",
+    )
+    label.add_argument(
+        "--no-evidence-suggest",
+        action="store_true",
+        help="don't offer the best-matching sentence or table row as evidence",
+    )
+    label.add_argument("--llm-config", type=Path, default=None, help="--suggest prompted")
+    label.add_argument("--device", default=None, help="--suggest minicheck/hhem/finetuned")
+    label.add_argument("--finetuned-path", type=Path, default=None, help="--suggest finetuned")
     label.set_defaults(func=cmd_label)
 
     plan = subparsers.add_parser(

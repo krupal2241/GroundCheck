@@ -48,7 +48,48 @@ def label_stats(all_records: list[LabelRecord], candidates: list[CandidateRecord
                           list(LABELS))  # fmt: skip
     lines += _cross_table("Question type x label", records, lambda r: r.qtype,
                           lambda r: r.label, list(LABELS))  # fmt: skip
+    lines += assistance_stats(records)
     return "\n".join(lines)
+
+
+def _shown(r: LabelRecord) -> bool:
+    return bool(r.assistance and r.assistance.label_suggestion_shown)
+
+
+def assistance_stats(records: list[LabelRecord]) -> list[str]:
+    """Agreement with label suggestions, and labels made with vs without them."""
+    with_s = [r for r in records if _shown(r)]
+    without = [r for r in records if not _shown(r)]
+    lines = ["Label suggestions (--suggest):"]
+    if with_s:
+        agreed = sum(bool(r.assistance.agreed) for r in with_s)
+        lines.append(
+            f"  shown for {len(with_s)} label(s); you agreed with {agreed} "
+            f"({agreed / len(with_s):.0%})"
+        )
+        by_verifier = Counter(r.assistance.suggestion_verifier for r in with_s)
+        lines.append(
+            "  by verifier: " + ", ".join(f"{k} {v}" for k, v in sorted(by_verifier.items()))
+        )
+    else:
+        lines.append("  none shown")
+    lines.append(
+        f"  label distribution, with suggestion (n={len(with_s)}) vs without (n={len(without)}):"
+    )
+    for label in LABELS:
+        a = sum(r.label == label for r in with_s)
+        b = sum(r.label == label for r in without)
+        pa = f"{a / len(with_s):.0%}" if with_s else "n/a"
+        pb = f"{b / len(without):.0%}" if without else "n/a"
+        lines.append(f"  {label:<20} {a:>5} ({pa:>4})   {b:>5} ({pb:>4})")
+    suggested = [r for r in records if r.assistance and r.assistance.evidence_suggested]
+    if suggested:
+        accepted = sum(r.assistance.evidence_accepted for r in suggested)
+        lines.append(
+            f"Evidence suggestions: offered for {len(suggested)} label(s), accepted "
+            f"{accepted} ({accepted / len(suggested):.0%})"
+        )
+    return lines
 
 
 def _cross_table(title, records, row_of, col_of, columns: list[str]) -> list[str]:

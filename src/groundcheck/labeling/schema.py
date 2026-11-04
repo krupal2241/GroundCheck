@@ -84,6 +84,20 @@ def make_span(chunk_id: str, chunk_text: str, evidence: str) -> EvidenceSpan | N
     return EvidenceSpan(chunk_id=chunk_id, text=needle, start=start, end=start + len(needle))
 
 
+class Assistance(BaseModel):
+    """What assistance was shown for one label (stored in `LabelRecord.assistance`)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    evidence_suggested: bool = False  # an evidence span was offered
+    evidence_accepted: bool = False  # ... and accepted with one key
+    label_suggestion_shown: bool = False
+    suggested_label: Label | None = None
+    suggestion_verifier: str | None = None
+    suggestion_score: float | None = None  # the verifier's P(supported)
+    agreed: bool | None = None  # final label == suggested label (None: none shown)
+
+
 class LabelRecord(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -101,6 +115,9 @@ class LabelRecord(BaseModel):
     confirmed: bool = False
     note: str = ""
     labeled_at: str = ""  # UTC, ISO 8601
+    # Which suggestions were shown (labeling/assist.py). None: labeled before
+    # assistance existed, i.e. nothing was suggested.
+    assistance: Assistance | None = None
 
     @field_validator("note")
     @classmethod
