@@ -761,3 +761,30 @@ otherwise it writes only `confirmed=True` labels, sorted by claim ID, each with 
 question, answer, claim, label, evidence, edge case, note, the retrieved passages and
 the generating model, so the gold file is self-contained for verifier evaluation.
 Unconfirmed drafts are counted and left out (PLAN.md: no fabricated gold labels).
+
+## Labeling guide and Mac quickstart (`docs/labeling_guide.md`, README), Day 10
+
+**What:** the labeling guide defines the three labels, how to cite evidence, and the
+nine edge cases from PLAN.md, each with a short worked example on made-up passages
+shown exactly as the labeler displays them: negation, numeric mismatch, rounding,
+units and scale, table misreads, temporal and fiscal-year claims, partial support,
+hedging, and absent evidence. The edge-case names in the guide are the tags in
+`labeling/schema.py` (a test keeps the two lists equal). The README's "Quickstart on a
+Mac" goes from `pip install` through Ollama, parse, chunk, index, generation and
+labeling.
+
+**Decisions written into the guide:**
+- Judge only against the retrieved chunks, never against the rest of the filing or
+  outside knowledge: the test set measures groundedness in what the model was given.
+- Rounding and scale follow PLAN.md: supported only if the source rounds correctly to
+  the claim's precision; unit or scale mistakes are contradicted. A claim *more*
+  precise than its source is unsupported (the extra digits can't be checked).
+- A year in a claim means the filing's own fiscal-year label unless the claim says
+  "calendar"; a value on the wrong period is contradicted, a period the chunks don't
+  cover is unsupported.
+- A bundled claim takes the label of its weakest part (contradicted > unsupported >
+  supported).
+- A claim that states as fact what the chunk only states as an expectation or a risk
+  is unsupported.
+- `contradicted` needs a span that makes the claim false; "can't find it" is
+  `unsupported`.
