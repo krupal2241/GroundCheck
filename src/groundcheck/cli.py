@@ -362,6 +362,65 @@ def cmd_error_report(args: argparse.Namespace) -> int:
     return 0
 
 
+DEMO_VERIFIERS = ["prompted", "hhem", "minicheck", "fake"]
+
+
+def cmd_demo(args: argparse.Namespace) -> int:
+    from groundcheck.demo.app import DemoPipeline, build_app
+    from groundcheck.generation.pipeline import RetrievalInfo
+    from groundcheck.generation.prompts import fake_responder
+    from groundcheck.retrieval.index import file_sha256
+
+    companies = load_companies(args.config)
+    tickers = args.company or [
+        c.ticker for c in companies.companies if (args.index_dir / c.ticker / "meta.json").is_file()
+    ]
+    if not tickers:
+        raise ConfigError(f"no company has an index in {args.index_dir}; run `groundcheck index`")
+    verifiers = args.verifiers or (["fake"] if args.dry_run else list(DEMO_VERIFIERS))
+    if args.finetuned_path and "finetuned" not in verifiers:
+        verifiers.append("finetuned")
+    llm_config = load_llm_config(args.llm_config)
+    if args.dry_run:
+        provider = make_provider(llm_config, "fake", use_cache=False, responder=fake_responder)
+    else:
+        provider = make_provider(llm_config, args.provider, args.model, allow_paid=args.allow_paid)
+    embedder = make_embedder(args.embedder, args.device)
+    indexes: dict[str, CompanyIndex] = {}
+
+    def index(ticker: str) -> CompanyIndex:
+        if ticker not in indexes:
+            indexes[ticker] = CompanyIndex.load(ticker, args.chunks_dir, args.index_dir)
+        return indexes[ticker]
+
+    def retrieve(ticker: str, question: str, k: int):
+        return index(ticker).search(embedder, question, k)
+
+    def retrieval_info(ticker: str) -> RetrievalInfo:
+        return RetrievalInfo(
+            embedder=embedder.name,
+            chunker=index(ticker).chunks[0].chunker,
+            top_k=llm_config.top_k,
+            chunks_sha256=file_sha256(chunks_path(ticker, args.chunks_dir)),
+        )
+
+    options = verifier_options(args)
+    if args.dry_run:
+        options.provider = "fake"
+    pipeline = DemoPipeline(
+        provider, retrieve, retrieval_info, llm_config, lambda n: make_verifier(n, options)
+    )
+    app = build_app(pipeline, tickers, verifiers)
+    identity = provider.identity()
+    print(
+        f"GroundCheck demo: {identity.provider} {identity.model}, embedder {embedder.name}, "
+        f"companies {', '.join(tickers)}, verifiers {', '.join(verifiers)}"
+    )
+    print(f"Open http://{args.host}:{args.port} (Ctrl-C to stop)")
+    app.launch(server_name=args.host, server_port=args.port, share=False)
+    return 0
+
+
 def cmd_build_training_data(args: argparse.Namespace) -> int:
     config = load_training_config(args.training_config)
     gold_paths = [args.gold, args.labels]
@@ -633,6 +692,37 @@ def build_parser() -> argparse.ArgumentParser:
         "--out", type=Path, default=None, help="default: <results-dir>/error_report.md"
     )
     errors.set_defaults(func=cmd_error_report)
+
+    demo = subparsers.add_parser(
+        "demo",
+        help="local Gradio demo: ask, retrieve, answer, verify each claim ([demo] extra)",
+    )
+    demo.add_argument("--config", type=Path, default=DEFAULT_COMPANIES_PATH)
+    demo.add_argument("--chunks-dir", type=Path, default=DEFAULT_CHUNKS_DIR)
+    demo.add_argument("--index-dir", type=Path, default=DEFAULT_INDEX_DIR)
+    demo.add_argument(
+        "--embedder", choices=["bge-small", "hashing"], default="bge-small",
+        help="must match the one the indexes were built with",
+    )  # fmt: skip
+    demo.add_argument(
+        "--company", nargs="+", metavar="TICKER", help="default: every company with an index"
+    )
+    demo.add_argument(
+        "--verifiers",
+        nargs="+",
+        choices=VERIFIER_NAMES,
+        default=None,
+        help=f"verifiers to offer (default: {' '.join(DEMO_VERIFIERS)}; fake with --dry-run)",
+    )
+    demo.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="fake LLM (answers with the top passage's first sentence); no Ollama needed",
+    )
+    demo.add_argument("--host", default="127.0.0.1")
+    demo.add_argument("--port", type=int, default=7860)
+    add_verifier_options(demo)
+    demo.set_defaults(func=cmd_demo)
 
     training = subparsers.add_parser(
         "build-training-data",

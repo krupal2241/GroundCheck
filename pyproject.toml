@@ -58,6 +58,11 @@ train = [
     "transformers>=4.43",
 ]
 
+# The local Gradio demo (`groundcheck demo`). Add [verifiers] for MiniCheck/HHEM in it.
+demo = [
+    "gradio>=4.44",
+]
+
 [project.scripts]
 groundcheck = "groundcheck.cli:main"
 

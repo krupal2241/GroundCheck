@@ -1080,3 +1080,35 @@ one stored by `eval-verifiers` and warns if the gold set changed since. Untagged
 (`(none)`) come last so the edge cases are read first. *Why Markdown:* it is for reading
 and pasting into notes or an issue; the JSON predictions remain the machine-readable form.
 Spans are shown as double-backtick inline code, so table pipes and dollar signs survive.
+
+## Local demo (`demo/app.py`, `groundcheck demo`), Part 5
+
+**What:** a Gradio page on 127.0.0.1:7860. Pick a company (every company with an index),
+type a question, pick a verifier; the page shows the answer, each claim with its label
+(colored), P(supported) and latency, the cited passage with the evidence span
+highlighted, and all retrieved passages in collapsible blocks.
+
+**Same code paths as the real pipeline:** `DemoPipeline.ask` calls
+`generation.pipeline.Generator.generate` (retrieve top-k from the company's FAISS
+index, answer with the local model using the candidate-generation prompts, split into
+claims with validated JSON), then the chosen verifier from `make_verifier` on the
+retrieved chunks. So the demo shows what the benchmark measures, not a parallel
+implementation. Highlighting uses the span's offsets into the normalized chunk text
+(the gold-span convention) and escapes everything else as HTML.
+
+**Choices:** verifiers are built the first time they're picked and then kept, since
+loading a model takes seconds and switching back should be instant; `--verifiers`
+limits the choices (on 8 GB, the 3B LLM plus DeBERTa-Large plus Flan-T5-base is
+already a lot). The server binds to 127.0.0.1 and always passes `share=False`: a
+public Gradio link would expose a model running on your laptop. Errors are shown in
+the page rather than as a stack trace. `--dry-run` swaps in the fake LLM (the
+answer is the top passage's first sentence) and the fake verifier, for checking the
+page without Ollama or model downloads; the embedder must still match the one the
+indexes were built with. Gradio is in the `[demo]` extra, imported only by `build_app`.
+*Alternative:* Streamlit; it re-runs the whole script on every interaction, which
+would reload the models unless cached by hand, and Gradio's HTML output is enough here.
+
+**Tests** run the pipeline on the tiny corpus with the fake LLM and fake verifier,
+check the highlighting and escaping, and build the app and the `demo` command over a
+stand-in `gradio` module (components, the click handler, and that `launch` gets
+127.0.0.1, port 7860, `share=False`).

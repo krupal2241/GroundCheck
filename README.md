@@ -8,8 +8,10 @@ the answer into atomic claims and labels each one **supported**, **contradicted*
 documents with messy tables and lots of numbers, which is where RAG answers tend to go
 wrong.
 
-> **Status:** Weeks 1–2 in progress. Building the RAG baseline and the labeling tooling.
-> No verifier model yet. See [docs/PLAN.md](docs/PLAN.md).
+> **Status:** the RAG baseline, labeling tooling, verifiers (prompted local LLM, MiniCheck,
+> HHEM, fine-tuned), the evaluation and error-report commands, and a local demo are built.
+> No benchmark numbers yet: they come from real runs on the labeled set. See
+> [docs/PLAN.md](docs/PLAN.md).
 
 ## Project goals
 
@@ -163,14 +165,76 @@ groundcheck export-labels
 Labels autosave to `data/labels/labels.jsonl`; `export-labels` writes only confirmed
 labels to `data/eval/gold_labels.jsonl`.
 
+## Verifiers: evaluate, analyze errors, fine-tune
+
+**Evaluate** verifiers on the confirmed gold labels. MiniCheck and HHEM need the
+`[verifiers]` extra (PyTorch + transformers; they download their weights from Hugging Face
+once and run on Apple MPS when available). Run one model at a time on an 8 GB Mac; results
+accumulate in one table:
+
+```bash
+pip install -e ".[verifiers]"
+```
+
+```bash
+groundcheck eval-verifiers --verifier prompted
+```
+
+```bash
+groundcheck eval-verifiers --verifier hhem
+```
+
+```bash
+groundcheck eval-verifiers --verifier minicheck
+```
+
+Each run updates `results/verifier_eval.json` and `results/verifier_eval.md` (the table to
+paste above) and writes per-claim predictions to `results/predictions/`. Cost is $0 for
+every local model; to see an **estimate** for a hosted judge, type its prices into
+`config/prices.yaml` (no API is ever called). Then list every mistake by edge case:
+
+```bash
+groundcheck error-report
+```
+
+**Fine-tune** a small verifier (deberta-v3-small) on synthetic data built from the chunks
+(the gold set is excluded and splits are by company): open
+`notebooks/finetune_verifier_colab.ipynb` on a free Colab T4, download the model zip,
+unzip it into `models/`, then:
+
+```bash
+groundcheck eval-verifiers --verifier finetuned --finetuned-path models/verifier-deberta-v3-small
+```
+
+## Demo
+
+A local web page: pick a company, type a question, and see the local model's answer
+split into claims, each labeled by the verifier you choose, with the evidence span
+highlighted in its passage. Everything runs on your machine (127.0.0.1, no share link).
+
+```bash
+pip install -e ".[demo,verifiers]"
+```
+
+```bash
+groundcheck demo
+```
+
+Open http://127.0.0.1:7860. It needs the indexes from step 4 and Ollama running. Offer
+fewer verifiers to save memory (`--verifiers prompted hhem`), add your fine-tuned model
+with `--finetuned-path models/verifier-deberta-v3-small`, or rehearse without Ollama or
+model downloads using `groundcheck demo --dry-run` (fake answers, fake verifier).
+
 ## Repository layout
 
 ```
-src/groundcheck/   package: edgar, parsing, chunking, retrieval, llm, generation, labeling
-scripts/           standalone runs (e.g. candidate generation)
-notebooks/         Colab notebook for candidate generation on a free GPU
-config/            companies (pinned accession numbers) and pipeline settings
+src/groundcheck/   package: edgar, parsing, chunking, retrieval, llm, generation, labeling,
+                   verify (verifiers, evaluation, error report), training, demo
+scripts/           standalone runs (candidate generation, verifier fine-tuning)
+notebooks/         Colab notebooks: candidate generation, verifier fine-tuning
+config/            companies (pinned accession numbers), LLM, training splits, prices
 data/              committed: chunks, questions, candidates, labels (raw filings are not)
+results/           verifier benchmark tables, predictions and error report
 docs/              PLAN.md, DESIGN.md, labeling_guide.md
 tests/             pytest suite (offline; no network, no models)
 ```
