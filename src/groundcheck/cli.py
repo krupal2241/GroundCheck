@@ -27,9 +27,12 @@ from groundcheck.config import (
     ConfigError,
     get_sec_user_agent,
     load_companies,
+    load_llm_config,
 )
 from groundcheck.edgar.client import SecClient, SecRequestError
 from groundcheck.edgar.download import DEFAULT_RAW_DIR, download_all, resolve_latest_10k
+from groundcheck.llm.base import LLMError, LLMRequest
+from groundcheck.llm.factory import PROVIDERS, make_provider
 from groundcheck.parsing.filing import DEFAULT_PARSED_DIR, load_parsed, parse_company
 from groundcheck.retrieval.embedder import (
     BGE_MAX_TOKENS,
@@ -209,6 +212,46 @@ def cmd_eval_retrieval(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_llm_info(args: argparse.Namespace) -> int:
+    config = load_llm_config(args.llm_config)
+    provider = make_provider(
+        config, args.provider, args.model, allow_paid=args.allow_paid, use_cache=False
+    )
+    identity = provider.identity()
+    print(f"provider:        {identity.provider}")
+    print(f"model:           {identity.model}")
+    print(f"model digest:    {identity.model_digest}")
+    print(f"runtime:         {identity.runtime} {identity.runtime_version}")
+    print(f"temperature:     {config.temperature}, seed {config.seed}")
+    if args.prompt:
+        request = LLMRequest(
+            prompt=args.prompt,
+            temperature=config.temperature,
+            seed=config.seed,
+            max_tokens=min(config.max_tokens, 64),
+        )
+        response = provider.generate(request)
+        print(f"reply:           {response.text.strip()[:200]}")
+        print(f"tokens:          {response.metadata.completion_tokens}")
+    return 0
+
+
+def add_llm_options(parser: argparse.ArgumentParser) -> None:
+    """--llm-config, --provider, --model and --allow-paid, shared with the scripts."""
+    parser.add_argument("--llm-config", type=Path, default=None, help="default: config/llm.yaml")
+    parser.add_argument(
+        "--provider", choices=sorted(PROVIDERS), default=None, help="default: from config"
+    )
+    parser.add_argument(
+        "--model", default=None, help="model name (default: from config, llama3.2:3b)"
+    )
+    parser.add_argument(
+        "--allow-paid",
+        action="store_true",
+        help="allow a provider that costs money (refused by default: $0 budget)",
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="groundcheck",
@@ -323,6 +366,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="only check that every gold string occurs in the chunks (no model needed)",
     )
     evaluation.set_defaults(func=cmd_eval_retrieval)
+
+    llm_info = subparsers.add_parser(
+        "llm-info",
+        help="show the LLM provider, model digest and runtime version (and test a prompt)",
+    )
+    add_llm_options(llm_info)
+    llm_info.add_argument(
+        "--prompt", default="Reply with the single word: ready", help="'' to skip the test call"
+    )
+    llm_info.set_defaults(func=cmd_llm_info)
     return parser
 
 
@@ -338,7 +391,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     try:
         return args.func(args)
-    except (ConfigError, SecRequestError) as exc:
+    except (ConfigError, SecRequestError, LLMError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 

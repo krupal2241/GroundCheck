@@ -32,6 +32,12 @@ dev = [
 embed = [
     "sentence-transformers>=3.0",
 ]
+# A local Hugging Face model for candidate generation on a Colab GPU (HFLocalProvider).
+hf = [
+    "accelerate>=0.30",
+    "torch>=2.2",
+    "transformers>=4.43",
+]
 
 [project.scripts]
 groundcheck = "groundcheck.cli:main"

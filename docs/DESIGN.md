@@ -590,3 +590,67 @@ renumber all windows after a split. Simpler IDs, but every later chunk ID in the
 section shifts. *Alternative:* token-based windows everywhere. That changes every
 chunk, not only the five that were too long.
 
+
+## LLM layer (`llm/`, `config/llm.yaml`), Day 9
+
+**What:** one interface and three providers, a disk cache, a paid-call guard and a
+structured-output helper. `groundcheck llm-info` prints the provider, model, digest and
+runtime version and sends a one-line test prompt, which is the quickest check that
+Ollama is up and the model is pulled.
+
+**The `LLMProvider` interface** (`llm/base.py`): a `typing.Protocol` with `name`,
+`model`, `paid`, `identity()` and `generate(request)`. An `LLMRequest` carries the
+system prompt, prompt, temperature, seed, max tokens and a JSON-mode flag; an
+`LLMResponse` is the text plus `LLMMetadata`: provider, model, **model digest**,
+runtime, **runtime version**, the sampling parameters, token counts, duration,
+whether it came from the cache, and how many structured-output attempts it took.
+*Why record all of it:* even at temperature 0 with a fixed seed, outputs change across
+model builds and runtime versions (PLAN.md risk "local model nondeterminism"), so the
+committed candidate JSONL has to say exactly what produced each answer.
+*Alternative:* LangChain or LiteLLM. Both hide the HTTP call and the parameters behind
+abstractions, which is the part worth being able to explain, and pull in many packages.
+
+**`OllamaProvider`** (`llm/ollama.py`): plain `requests` to `localhost:11434`:
+`/api/version` for the runtime version, `/api/tags` for the model's sha256 digest
+(both fetched once and remembered), `/api/generate` with `stream: false` and
+`options: {temperature, seed, num_predict, num_ctx}`, plus `format: "json"` when JSON
+is wanted. `num_ctx` is set to 8,192 (`context_window`): many Ollama versions default
+to 2,048 tokens and silently cut the front of a prompt with five retrieved chunks.
+Connection errors and missing models become one-line errors that say what to run
+(`ollama serve`, `ollama pull llama3.2:3b`). Defaults: `llama3.2:3b`, temperature 0,
+seed 42, all in `config/llm.yaml`; `--model` overrides the model.
+
+**`FakeProvider`** (`llm/fake.py`): returns scripted responses, or a function of the
+request, and records every request. Tests and `--dry-run` use it. Its digest is
+`fake-digest`, so fake output can never be mistaken for a real model's.
+
+**`HFLocalProvider`** (`llm/hf_local.py`): a local `transformers` model for a free Colab
+GPU (default `Qwen/Qwen2.5-3B-Instruct`, ungated). The prompt goes through the model's
+own chat template; temperature 0 means greedy decoding. Its "digest" is the Hub commit
+hash the weights came from. `transformers`/`torch` are in the `[hf]` extra and imported
+only when the provider is built; tests use stand-in modules.
+
+**Paid-call guard** (`llm/factory.py`): every provider is built through
+`make_provider`, which refuses any provider marked paid unless `allow_paid=True`
+(`--allow-paid`). Paid-ness is declared in the registry, so the refusal happens before a
+paid client is even constructed, and the instance's own `paid` flag is checked again
+afterwards. No paid provider exists; tests register a stand-in to prove the guard
+works. *Alternative:* an environment variable. A flag must be typed on every run,
+which is the point.
+
+**Disk cache** (`llm/cache.py`, `data/cache/llm/`, gitignored): the key is the sha256 of
+canonical JSON holding provider, model, model digest, runtime version, system prompt,
+prompt and every sampling parameter. A re-pulled model has a new digest and never
+reuses old answers. One file per entry, written atomically; a corrupt entry is treated
+as a miss. This makes re-runs after a crash or a schema fix free: only the requests that
+changed reach the model.
+
+**Structured output** (`llm/structured.py`): small models wrap JSON in prose or code
+fences and miss fields. `generate_structured` sends the request in JSON mode, extracts
+the first balanced `{...}`, validates it against a pydantic model and, on failure,
+re-sends the prompt *with the error appended*, at most 3 attempts in total
+(`json_max_attempts`). The error has to be in the retry prompt: at temperature 0 an
+identical retry returns the identical bad answer (and would be a cache hit).
+*Alternative:* grammar-constrained decoding (Ollama's JSON-schema `format`). It is
+newer than some Ollama installs and still needs validation for semantic rules, so the
+generic retry loop comes first.
