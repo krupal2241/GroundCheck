@@ -22,6 +22,10 @@ ordering means a TOC entry can't be picked once the real sections have started.
 
 Each section runs from its heading to the next picked heading. Missing expected items
 (1, 1A, 7, 8) are logged as WARNINGs and returned, never silently skipped.
+
+`check_section_sizes` adds a second tripwire: a key Item that is suspiciously short (a
+cross-reference stub) or any other Item that is suspiciously long (it swallowed text
+that belongs elsewhere). The thresholds are the `SECTION SIZE THRESHOLDS` block below.
 """
 
 import logging
@@ -33,6 +37,21 @@ from groundcheck.parsing.html_text import CELL_SEPARATOR, TABLE_START
 logger = logging.getLogger(__name__)
 
 EXPECTED_ITEMS = ("1", "1A", "7", "8")
+
+# --- SECTION SIZE THRESHOLDS ------------------------------------------------------------
+# Items 1, 1A, 7 and 8 are the long, substantive parts of every 10-K. One of them under
+# MIN_KEY_SECTION_CHARS is almost always a cross-reference stub ("see pages 50-160"),
+# e.g. JPM Item 7 (396 chars) and XOM Item 8 (710 chars). Any *other* Item over
+# MAX_OTHER_SECTION_CHARS has almost always swallowed text that belongs to another
+# Item, e.g. JPM Item 15 (1,050,977 chars) holding the whole annual report. Real
+# sections that must stay quiet: JNJ Item 8 (227,361), BRK-B Item 1 (126,647) and
+# XOM Item 2 (40,860). Both checks are WARNINGs, and together they trigger
+# cross-reference layout recovery (parsing/recovery.py).
+KEY_ITEMS = ("1", "1A", "7", "8")
+MIN_KEY_SECTION_CHARS = 1_500
+MAX_OTHER_SECTION_CHARS = 60_000
+# -----------------------------------------------------------------------------------------
+
 MIN_SECTION_CHARS = 200
 MAX_HEADING_CHARS = 200
 BLOCK_SEPARATOR = "\n\n"
@@ -46,7 +65,7 @@ ITEM_RE = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 ITEM_ID_RE = re.compile(r"\d{1,2}[A-C]?", re.IGNORECASE)
-TRAILING_PAGE_RE = re.compile(r"\s+\d{1,3}$")
+TRAILING_PAGE_RE = re.compile(r"\s+\d{1,3}(?:\s*[-–—]\s*\d{1,3})?$")  # "45", "50–160"
 PART_HEADING_RE = re.compile(r"^PART\s+[IV]+\b.{0,80}$", re.IGNORECASE)
 HEADING_PUNCTUATION = ".:-–—"
 
@@ -57,6 +76,15 @@ class Section:
     title: str
     text: str  # heading block included, blocks joined by blank lines
     covers: list[str] = field(default_factory=list)  # e.g. ["1", "2"] for "Items 1 and 2"
+    recovered: bool = False  # True if relabeled by cross-reference layout recovery
+
+    @property
+    def items(self) -> list[str]:
+        return self.covers or [self.item]
+
+    @property
+    def label(self) -> str:
+        return "Items " + ", ".join(self.covers) if self.covers else f"Item {self.item}"
 
 
 @dataclass
@@ -144,6 +172,39 @@ def split_sections(
 
     front = sum(len(b) for b in blocks[: picked[0].block]) if picked else len(text)
     return SplitResult(sections=sections, warnings=warnings, front_matter_chars=front)
+
+
+def is_key_section(section: Section) -> bool:
+    return any(item in KEY_ITEMS for item in section.items)
+
+
+def is_stub(section: Section) -> bool:
+    """A key Item too short to be the real section (usually a cross-reference)."""
+    return is_key_section(section) and len(section.text) < MIN_KEY_SECTION_CHARS
+
+
+def is_oversized(section: Section) -> bool:
+    """A non-key Item long enough that it has probably swallowed other Items' text."""
+    return not is_key_section(section) and len(section.text) > MAX_OTHER_SECTION_CHARS
+
+
+def check_section_sizes(sections: list[Section]) -> list[str]:
+    """Warnings for stub-sized key Items and oversized other Items (not logged here)."""
+    warnings = []
+    for section in sections:
+        n = len(section.text)
+        if is_stub(section):
+            warnings.append(
+                f"{section.label} is only {n:,} characters (expected at least "
+                f"{MIN_KEY_SECTION_CHARS:,}); probably a cross-reference stub"
+            )
+        elif is_oversized(section):
+            warnings.append(
+                f"{section.label} has {n:,} characters (expected at most "
+                f"{MAX_OTHER_SECTION_CHARS:,} outside Items {', '.join(KEY_ITEMS)}); "
+                "it probably contains other Items' text"
+            )
+    return warnings
 
 
 def _pick(candidates: list[_Candidate], warnings: list[str]) -> list[_Candidate]:

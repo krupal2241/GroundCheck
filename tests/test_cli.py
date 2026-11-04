@@ -1,8 +1,10 @@
+import sys
 from pathlib import Path
 
 import pytest
 
-from groundcheck import __version__
+from groundcheck import __version__, cli
+from groundcheck.chunking.base import read_chunks
 from groundcheck.cli import main
 
 
@@ -91,7 +93,8 @@ def test_parse_prints_missing_item_warnings(capsys, tmp_path):
     assert main([*args, "--parsed-dir", str(tmp_path / "parsed")]) == 0
     out = capsys.readouterr().out
     assert "WARNING: missing Item 1A" in out and "WARNING: missing Item 8" in out
-    assert "3 warning(s)" in out
+    assert "WARNING: Item 7 is only" in out  # the size check counts too
+    assert "4 warning(s)" in out
 
 
 def test_parse_without_download_is_a_clean_error(capsys, tmp_path):
@@ -103,12 +106,35 @@ def test_parse_without_download_is_a_clean_error(capsys, tmp_path):
 def test_chunk_command(capsys, tmp_path):
     test_parse_command(capsys, tmp_path)  # writes tmp_path/parsed/EXCO.json
     chunks_dir = tmp_path / "chunks"
-    args = ["chunk", "--config", str(_pinned_config(tmp_path)), "--parsed-dir"]
-    assert main([*args, str(tmp_path / "parsed"), "--chunks-dir", str(chunks_dir)]) == 0
+    args = ["chunk", "--config", str(_pinned_config(tmp_path)), "--tokenizer", "none"]
+    args += ["--parsed-dir", str(tmp_path / "parsed"), "--chunks-dir", str(chunks_dir)]
+    assert main(args) == 0
     out = capsys.readouterr().out
-    assert "fixed-p250-o50-t120" in out and "EXCO" in out
+    assert "fixed-p250-o50-t120, no token limit" in out and "EXCO" in out
     lines = (chunks_dir / "EXCO.jsonl").read_text().splitlines()
     assert lines and '"kind": "table"' in "".join(lines)
+
+
+def test_chunk_command_splits_with_the_token_counter(capsys, monkeypatch, tmp_path):
+    # A fake tokenizer (3 tokens per word) instead of bge's, so no download is needed.
+    monkeypatch.setattr(cli, "load_bge_token_counter", lambda: lambda t: 3 * len(t.split()))
+    test_parse_command(capsys, tmp_path)
+    chunks_dir = tmp_path / "chunks"
+    args = ["chunk", "--config", str(_pinned_config(tmp_path)), "--max-tokens", "300"]
+    args += ["--parsed-dir", str(tmp_path / "parsed"), "--chunks-dir", str(chunks_dir)]
+    assert main(args) == 0
+    out = capsys.readouterr().out
+    assert "fixed-p250-o50-t120-k300, max 300 tokens" in out
+    assert "split part(s)" in out and "WARNING" not in out
+    chunks = read_chunks(chunks_dir / "EXCO.jsonl")
+    assert all(3 * len(c.text.split()) <= 300 for c in chunks)
+    assert len({c.chunk_id for c in chunks}) == len(chunks)
+
+
+def test_chunk_without_the_embed_extra_is_a_clean_error(capsys, monkeypatch, tmp_path):
+    monkeypatch.setitem(sys.modules, "transformers", None)  # import fails
+    assert main(["chunk", "--config", str(_pinned_config(tmp_path))]) == 2
+    assert "--tokenizer none" in capsys.readouterr().err
 
 
 def test_chunk_bad_settings_is_a_clean_error(capsys, tmp_path):
@@ -119,7 +145,7 @@ def test_chunk_bad_settings_is_a_clean_error(capsys, tmp_path):
 
 def test_chunk_before_parse_is_a_clean_error(capsys, tmp_path):
     args = ["chunk", "--config", str(_pinned_config(tmp_path)), "--parsed-dir", str(tmp_path)]
-    assert main(args) == 2
+    assert main([*args, "--tokenizer", "none"]) == 2
     assert "run `groundcheck parse`" in capsys.readouterr().err
 
 
