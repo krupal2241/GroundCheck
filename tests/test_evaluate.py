@@ -114,6 +114,56 @@ def test_summary_means_and_breakdowns():
     assert "overall" in text and "R@1" in text and "S@5" in text
 
 
+def test_mrr_and_latency():
+    questions = [
+        q("Q1", gold=("$2,000 million",)),  # c4 at rank 2 -> 1/2
+        q("Q2", qtype="table", gold=("Total net sales | $12,345",)),  # c3 at rank 3 -> 1/3
+        q("Q3", gold=("10 million shares",)),  # c5 not retrieved -> 0
+    ]
+    report = run(questions, ["c1", "c4", "c3"])
+    assert [r.reciprocal_rank for r in report.questions] == [0.5, pytest.approx(1 / 3), 0.0]
+    assert report.overall.mrr == pytest.approx((0.5 + 1 / 3 + 0) / 3)
+    assert all(r.latency_ms is not None and r.latency_ms >= 0 for r in report.questions)
+    assert report.overall.latency_ms == pytest.approx(
+        sum(r.latency_ms for r in report.questions) / 3
+    )
+    assert "MRR" in format_report(report) and "ms/q" in format_report(report)
+
+
+def test_comparison_table_json_and_markdown(tmp_path):
+    import json
+
+    from groundcheck.retrieval.compare import write_comparison
+
+    questions = [q("Q1", gold=("$2,000 million",)), q("Q2", qtype="table", gold=("$12,345",))]
+    reports = {
+        "slow-good": run(questions, ["c4", "c3"], ks=(1, 3, 5, 10)),
+        "fast-bad": run(questions, ["c1", "c2", "c5"], ks=(1, 3, 5, 10)),
+        "lexical": run(questions, ["c3", "c4"], ks=(1, 3, 5, 10)),
+    }
+    reports["slow-good"].overall.latency_ms = 50.0
+    reports["fast-bad"].overall.latency_ms = 1.0
+    reports["lexical"].overall.latency_ms = 0.1
+    table, recommendation, json_path, md_path = write_comparison(
+        reports, [1, 3, 5, 10], tmp_path, diagnostic={"lexical"}
+    )
+    lines = table.splitlines()
+    assert lines[0].split()[:3] == ["variant", "n", "R@1"] and "MRR" in lines[0]
+    assert [line.split()[0] for line in lines[1:]] == ["slow-good", "fast-bad", "lexical"]
+    assert lines[3].endswith("(diagnostic)")
+    # lexical ties slow-good and is faster, but it is diagnostic: never recommended.
+    assert recommendation.startswith("`slow-good`")
+    payload = json.loads(json_path.read_text())
+    assert payload["recommended_default"] == "slow-good"
+    assert "2 questions" in payload["note"] and "noise" in payload["note"]
+    assert payload["variants"][0]["recall"]["5"] == 1.0
+    assert payload["variants"][0]["recall_at_5_by_qtype"] == {"numeric_lookup": 1.0, "table": 1.0}
+    md = md_path.read_text()
+    assert "| `slow-good` | 1.00 | 1.00 |" in md
+    assert "## Recall@5 by question type" in md and "## Recall@5 by company" in md
+    assert "**Recommended default:** `slow-good`" in md
+
+
 def test_skipped_questions_are_counted_not_scored():
     questions = [
         q("filled"),

@@ -39,6 +39,8 @@ class VariantSpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     description: str = ""
+    # Compared by --compare but never recommended as the default (e.g. BM25 alone).
+    diagnostic: bool = False
     embedder: EmbedderKind | None = "bge-small"
     headers: bool = False
     bm25: bool = False
@@ -145,7 +147,8 @@ def recommend_default(
     """The rule from PLAN/DESIGN: the best recall@k, but among the variants within
     `tolerance` of the best, the one with the lowest average query latency. Returns
     (variant, reason), or None with no rows. Each row needs `variant`, `recall`
-    (keyed by k) and `latency_ms`."""
+    (keyed by k) and `latency_ms`; rows with `diagnostic: True` are left out."""
+    rows = [r for r in rows if not r.get("diagnostic")]
     if not rows:
         return None
     best = max(r["recall"][k] for r in rows)

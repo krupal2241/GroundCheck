@@ -44,6 +44,7 @@ from groundcheck.labeling.store import (
 from groundcheck.llm.base import LLMError, LLMRequest
 from groundcheck.llm.factory import PROVIDERS, make_provider
 from groundcheck.parsing.filing import DEFAULT_PARSED_DIR, load_parsed, parse_company
+from groundcheck.retrieval.compare import write_comparison
 from groundcheck.retrieval.embedder import (
     BGE_MAX_TOKENS,
     EMBEDDERS,
@@ -59,7 +60,7 @@ from groundcheck.retrieval.evaluate import (
     load_questions,
 )
 from groundcheck.retrieval.index import DEFAULT_INDEX_DIR
-from groundcheck.retrieval.rerank import RERANKERS
+from groundcheck.retrieval.rerank import RERANKERS, make_reranker
 from groundcheck.retrieval.retriever import build_variant_index, open_retriever
 from groundcheck.retrieval.variants import (
     DEFAULT_RETRIEVAL_CONFIG_PATH,
@@ -276,18 +277,57 @@ def cmd_eval_retrieval(args: argparse.Namespace) -> int:
         return 1
 
     config = _retrieval_config(args)
-    name, spec = _variant(args, config)
-    retriever = _open_retriever(args, config, name, spec, sorted(corpora))
+    if args.compare and args.variant:
+        raise ConfigError("--compare runs every configured variant; drop --variant")
+    names = list(config.variants) if args.compare else [config.get(args.variant)[0]]
+    tickers = sorted(corpora)
+    # Open every retriever first, so a missing index fails before any evaluation.
+    # Models are shared between variants that use the same one.
+    embedders: dict[str, object] = {}
+    rerankers: dict[str, object] = {}
+    retrievers = {}
+    for name in names:
+        _, spec = _variant(args, config, name)
+        if spec.embedder and spec.embedder not in embedders:
+            embedders[spec.embedder] = make_embedder(spec.embedder, args.device)
+        if spec.rerank and spec.rerank not in rerankers:
+            rerankers[spec.rerank] = make_reranker(spec.rerank, args.device)
+        retrievers[name] = _open_retriever(
+            args,
+            config,
+            name,
+            spec,
+            tickers,
+            embedder=embedders.get(spec.embedder) if spec.embedder else None,
+            reranker=rerankers.get(spec.rerank) if spec.rerank else None,
+        )
 
-    def retrieve(ticker: str, question: str, k: int):
-        return [hit.chunk for hit in retriever.search(ticker, question, k)]
+    reports = {}
+    for name, retriever in retrievers.items():
+        for ticker in tickers:  # warm-up, untimed: first-call overhead (e.g. MPS kernels)
+            retriever.search(ticker, "warm-up query", max(ks))
 
-    report = evaluate(questions, corpora, retrieve, f"{name}: {retriever.description}", ks)
-    print(format_report(report))
-    out = args.out or args.results_dir / f"retrieval_{name}.json"
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(report.model_dump_json(indent=2) + "\n")
-    print(f"Per-question results: {out}")
+        def retrieve(ticker: str, question: str, k: int, retriever=retriever):
+            return [hit.chunk for hit in retriever.search(ticker, question, k)]
+
+        report = evaluate(questions, corpora, retrieve, retriever.description, ks, variant=name)
+        reports[name] = report
+        out = args.out if args.out and not args.compare else None
+        out = out or args.results_dir / f"retrieval_{name}.json"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(report.model_dump_json(indent=2) + "\n")
+        if not args.compare:
+            print(format_report(report))
+            print(f"Per-question results: {out}")
+    if args.compare:
+        diagnostic = {n for n in names if config.variants[n].diagnostic}
+        table, recommendation, json_path, md_path = write_comparison(
+            reports, list(ks), args.results_dir, diagnostic
+        )
+        print(table)
+        print(f"Recommended default: {recommendation}")
+        print(f"Comparison: {json_path} and {md_path}")
+        print(f"Per-question results: {args.results_dir}/retrieval_<variant>.json")
     return 0
 
 
@@ -502,14 +542,23 @@ def build_parser() -> argparse.ArgumentParser:
     evaluation = subparsers.add_parser(
         "eval-retrieval",
         parents=[embed_options],
-        help="recall@k and section-hit@k against the gold evidence in the question file",
+        help="recall@k, section-hit@k, MRR and latency against the gold evidence "
+        "(one variant, or --compare for all)",
     )
     evaluation.add_argument("--questions", type=Path, default=DEFAULT_QUESTIONS_PATH)
     evaluation.add_argument("-k", type=int, nargs="+", default=list(DEFAULT_KS))
     evaluation.add_argument(
         "--results-dir", type=Path, default=DEFAULT_QUESTIONS_PATH.parent / "results"
     )
-    evaluation.add_argument("--out", type=Path, default=None, help="report JSON path")
+    evaluation.add_argument(
+        "--out", type=Path, default=None, help="report JSON path (single variant only)"
+    )
+    evaluation.add_argument(
+        "--compare",
+        action="store_true",
+        help="run every variant in the retrieval config and print one comparison table "
+        "(also written to <results-dir>/compare.json and compare.md)",
+    )
     evaluation.add_argument(
         "--check",
         action="store_true",

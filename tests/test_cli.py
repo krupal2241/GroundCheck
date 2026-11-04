@@ -205,3 +205,70 @@ def test_eval_retrieval_on_empty_template(capsys, tmp_path):
     args = ["eval-retrieval", "--questions", str(questions)]
     assert main([*args, "--chunks-dir", str(tmp_path), "--embedder", "hashing"]) == 1
     assert "Nothing to evaluate yet" in capsys.readouterr().out
+
+
+def _variant_config(tmp_path):
+    """Every kind of variant, with offline fakes for every model."""
+    path = tmp_path / "retrieval.yaml"
+    path.write_text(
+        "default: hybrid\npool: 5\nvariants:\n"
+        "  dense: {embedder: hashing}\n"
+        "  dense-headers: {embedder: hashing, headers: true}\n"
+        "  hybrid: {embedder: hashing, bm25: true}\n"
+        "  hybrid-headers-rerank: {embedder: hashing, headers: true, bm25: true,"
+        " rerank: overlap}\n"
+        "  bm25: {embedder: null, bm25: true, diagnostic: true}\n"
+    )
+    return path
+
+
+def test_index_all_variants_and_compare(capsys, tmp_path):
+    test_chunk_command(capsys, tmp_path)
+    variants = _variant_config(tmp_path)
+    common = ["--chunks-dir", str(tmp_path / "chunks"), "--index-dir", str(tmp_path / "index")]
+    common += ["--retrieval-config", str(variants), "--config", str(_pinned_config(tmp_path))]
+    assert main(["index", "--variant", "all", *common]) == 0
+    out = capsys.readouterr().out
+    assert "Variant hybrid: uses the same index as dense" in out
+    assert "Variant hybrid-headers-rerank: uses the same index as dense-headers" in out
+    assert "Variant bm25: no dense stage" in out
+    assert sorted(p.name for p in (tmp_path / "index").iterdir()) == [
+        "hashing-256",
+        "hashing-256+headers-h1",
+    ]
+
+    questions = _write_questions(tmp_path, "Example Corp designs and sells widgets.")
+    results = tmp_path / "results"
+    args = ["eval-retrieval", *common, "--questions", str(questions)]
+    assert main([*args, "--compare", "--results-dir", str(results)]) == 0
+    out = capsys.readouterr().out
+    table = [line.split()[0] for line in out.splitlines() if line.split()]
+    for name in ["dense", "dense-headers", "hybrid", "hybrid-headers-rerank", "bm25"]:
+        assert name in table
+    assert "MRR" in out and "ms/q" in out and "Recommended default: `" in out
+    assert (results / "compare.json").is_file() and (results / "compare.md").is_file()
+    assert (results / "retrieval_hybrid-headers-rerank.json").is_file()
+
+    # One variant: the default (hybrid), then an explicit one.
+    assert main([*args, "--results-dir", str(results)]) == 0
+    assert "Variant: hybrid   Retriever: dense=hashing-256 bm25 rrf_k=60 pool=5" in (
+        capsys.readouterr().out
+    )
+    assert main([*args, "--variant", "bm25", "--results-dir", str(results)]) == 0
+    assert "Variant: bm25" in capsys.readouterr().out
+    assert main([*args, "--compare", "--variant", "bm25"]) == 2
+    assert "drop --variant" in capsys.readouterr().err
+
+
+def test_eval_retrieval_refuses_a_missing_variant_index(capsys, tmp_path):
+    test_chunk_command(capsys, tmp_path)
+    variants = _variant_config(tmp_path)
+    common = ["--chunks-dir", str(tmp_path / "chunks"), "--index-dir", str(tmp_path / "index")]
+    common += ["--retrieval-config", str(variants), "--config", str(_pinned_config(tmp_path))]
+    assert main(["index", "--variant", "dense", *common]) == 0
+    questions = _write_questions(tmp_path, "Example Corp designs and sells widgets.")
+    args = ["eval-retrieval", *common, "--questions", str(questions)]
+    assert main([*args, "--variant", "dense-headers"]) == 2
+    assert "groundcheck index --variant dense-headers" in capsys.readouterr().err
+    assert main([*args, "--variant", "nope"]) == 2
+    assert "unknown retrieval variant 'nope'" in capsys.readouterr().err

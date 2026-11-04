@@ -3,6 +3,7 @@
 # `groundcheck eval-retrieval --compare` runs every variant listed here.
 #
 # Per variant:
+#   diagnostic  true: shown by --compare but never recommended as the default
 #   embedder  bge-small | bge-base | hashing (offline fake) | null (no dense stage)
 #   headers   true: embed "<TICKER> FY<year> 10-K | Item <n> <title> | <prose|table>"
 #             + the chunk text. Only the embedded (and reranked) text gets the header;
@@ -53,6 +54,7 @@ variants:
     headers: true
     bm25: true
   bm25:
-    description: "BM25 alone (diagnostic: no model at all)"
+    description: "BM25 alone, no model: shows how much the eval rewards exact terms"
+    diagnostic: true   # compared, never recommended as the default
     embedder: null
     bm25: true
