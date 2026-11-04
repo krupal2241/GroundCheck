@@ -1,8 +1,9 @@
 """Turn text into unit-length vectors, behind one `Embedder` interface.
 
-- `BgeEmbedder`: `BAAI/bge-small-en-v1.5` through sentence-transformers, on Apple MPS
-  if available, else CPU. Needs the `[embed]` extra and downloads the model from
-  Hugging Face on first use (so it only runs on your machine, not in CI).
+- `BgeEmbedder`: `BAAI/bge-small-en-v1.5` (384-dim) or `BAAI/bge-base-en-v1.5`
+  (768-dim) through sentence-transformers, on Apple MPS if available, else CPU. Needs
+  the `[embed]` extra and downloads the model from Hugging Face on first use (so it
+  only runs on your machine, not in CI).
 - `HashingEmbedder`: a deterministic fake for tests. Each lowercase word is hashed
   into one of `dim` buckets, so texts that share words get similar vectors. It needs no
   model and no network.
@@ -21,6 +22,9 @@ import numpy as np
 from groundcheck.config import ConfigError
 
 BGE_MODEL = "BAAI/bge-small-en-v1.5"
+BGE_BASE_MODEL = "BAAI/bge-base-en-v1.5"
+# Embedder kinds selectable in config/retrieval.yaml and on the command line.
+EMBEDDERS = {"bge-small": BGE_MODEL, "bge-base": BGE_BASE_MODEL, "hashing": None}
 # The query instruction recommended for bge v1.5 retrieval. Passages get no prefix.
 BGE_QUERY_PREFIX = "Represent this sentence for searching relevant passages: "
 BGE_MAX_TOKENS = 512
@@ -82,7 +86,8 @@ def pick_device() -> str:
 
 
 class BgeEmbedder:
-    """BAAI/bge-small-en-v1.5 via sentence-transformers (384-dim)."""
+    """A bge v1.5 model via sentence-transformers (small: 384-dim, base: 768-dim). Both
+    use the same query instruction and 512-token limit."""
 
     def __init__(self, model_name: str = BGE_MODEL, device: str | None = None, batch_size=32):
         try:
@@ -148,8 +153,8 @@ def load_bge_token_counter(model_name: str = BGE_MODEL) -> Callable[[str], int]:
 
 
 def make_embedder(kind: str, device: str | None = None) -> Embedder:
-    if kind == "bge-small":
-        return BgeEmbedder(device=device)
     if kind == "hashing":
         return HashingEmbedder()
-    raise ConfigError(f"unknown embedder {kind!r}; use 'bge-small' or 'hashing'")
+    if EMBEDDERS.get(kind):
+        return BgeEmbedder(EMBEDDERS[kind], device=device)
+    raise ConfigError(f"unknown embedder {kind!r}; use one of {', '.join(EMBEDDERS)}")

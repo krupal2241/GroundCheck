@@ -46,6 +46,7 @@ from groundcheck.llm.factory import PROVIDERS, make_provider
 from groundcheck.parsing.filing import DEFAULT_PARSED_DIR, load_parsed, parse_company
 from groundcheck.retrieval.embedder import (
     BGE_MAX_TOKENS,
+    EMBEDDERS,
     load_bge_token_counter,
     make_embedder,
 )
@@ -57,7 +58,17 @@ from groundcheck.retrieval.evaluate import (
     format_report,
     load_questions,
 )
-from groundcheck.retrieval.index import DEFAULT_INDEX_DIR, CompanyIndex, build_company_index
+from groundcheck.retrieval.index import DEFAULT_INDEX_DIR
+from groundcheck.retrieval.rerank import RERANKERS
+from groundcheck.retrieval.retriever import build_variant_index, open_retriever
+from groundcheck.retrieval.variants import (
+    DEFAULT_RETRIEVAL_CONFIG_PATH,
+    RetrievalConfig,
+    VariantSpec,
+    fiscal_years,
+    load_retrieval_config,
+    model_text,
+)
 
 
 def cmd_resolve_filings(args: argparse.Namespace) -> int:
@@ -155,30 +166,87 @@ def cmd_chunk(args: argparse.Namespace) -> int:
     return 0
 
 
+def _retrieval_config(args: argparse.Namespace) -> RetrievalConfig:
+    return load_retrieval_config(args.retrieval_config)
+
+
+def _variant(
+    args: argparse.Namespace, config: RetrievalConfig, name: str | None = None
+) -> tuple[str, VariantSpec]:
+    """The chosen variant, with --embedder / --reranker overrides applied."""
+    name, spec = config.get(name or args.variant)
+    return name, spec.with_overrides(args.embedder, args.reranker)
+
+
+def _open_retriever(args, config, name, spec, tickers, embedder=None, reranker=None):
+    return open_retriever(
+        name,
+        spec,
+        config,
+        tickers,
+        args.chunks_dir,
+        args.index_dir,
+        fiscal_years(load_companies(args.config)),
+        embedder=embedder,
+        reranker=reranker,
+        device=args.device,
+    )
+
+
 def cmd_index(args: argparse.Namespace) -> int:
     config = load_companies(args.config)
     companies = [config.get(t) for t in args.only] if args.only else config.companies
-    embedder = make_embedder(args.embedder, args.device)
-    print(f"Embedder: {embedder.name} (dim {embedder.dim})")
-    for company in companies:
-        if hasattr(embedder, "token_counts"):
-            chunks = read_chunks(chunks_path(company.ticker, args.chunks_dir))
-            counts = embedder.token_counts([c.text for c in chunks])
-            over = [
-                (c.chunk_id, n) for c, n in zip(chunks, counts, strict=True) if n > BGE_MAX_TOKENS
-            ]
-            print(f"  {company.ticker}: longest chunk {max(counts, default=0)} tokens")
-            for chunk_id, n in over:
-                print(f"  WARNING: {chunk_id} has {n} tokens; truncated to {BGE_MAX_TOKENS}")
-        n = build_company_index(company.ticker, embedder, args.chunks_dir, args.index_dir)
-        print(f"  {company.ticker:<6} {n:>6} vectors -> {args.index_dir / company.ticker}")
+    years = fiscal_years(config)
+    retrieval = _retrieval_config(args)
+    names = list(retrieval.variants) if args.variant == "all" else [_variant(args, retrieval)[0]]
+    embedders: dict[str, object] = {}
+    built: dict[tuple[str, bool], str] = {}
+    for name in names:
+        _, spec = _variant(args, retrieval, name)
+        if spec.embedder is None:
+            print(f"Variant {name}: no dense stage, so no index to build")
+            continue
+        if (spec.embedder, spec.headers) in built:
+            print(f"Variant {name}: uses the same index as {built[spec.embedder, spec.headers]}")
+            continue
+        built[spec.embedder, spec.headers] = name
+        if spec.embedder not in embedders:
+            embedders[spec.embedder] = make_embedder(spec.embedder, args.device)
+        embedder = embedders[spec.embedder]
+        headers = " + contextual headers" if spec.headers else ""
+        print(f"Variant {name}: embedder {embedder.name} (dim {embedder.dim}){headers}")
+        for company in companies:
+            if hasattr(embedder, "token_counts"):
+                chunks = read_chunks(chunks_path(company.ticker, args.chunks_dir))
+                texts = [model_text(c, spec.headers, years.get(company.ticker)) for c in chunks]
+                counts = embedder.token_counts(texts)
+                over = [
+                    (c.chunk_id, n)
+                    for c, n in zip(chunks, counts, strict=True)
+                    if n > BGE_MAX_TOKENS
+                ]
+                print(f"  {company.ticker}: longest chunk {max(counts, default=0)} tokens")
+                for chunk_id, n in over:
+                    print(f"  WARNING: {chunk_id} has {n} tokens; truncated to {BGE_MAX_TOKENS}")
+            n, folder = build_variant_index(
+                name,
+                spec,
+                company.ticker,
+                embedder,
+                args.chunks_dir,
+                args.index_dir,
+                years.get(company.ticker),
+            )
+            print(f"  {company.ticker:<6} {n:>6} vectors -> {folder}")
     return 0
 
 
 def cmd_retrieve(args: argparse.Namespace) -> int:
-    embedder = make_embedder(args.embedder, args.device)
-    index = CompanyIndex.load(args.ticker, args.chunks_dir, args.index_dir)
-    for hit in index.search(embedder, args.question, args.k):
+    config = _retrieval_config(args)
+    name, spec = _variant(args, config)
+    retriever = _open_retriever(args, config, name, spec, [args.ticker])
+    print(f"Variant {name}: {retriever.description}")
+    for hit in retriever.search(args.ticker, args.question, args.k):
         preview = " ".join(hit.chunk.text.split())[:160]
         print(f"{hit.rank:>2}. {hit.score:.3f}  {hit.chunk.chunk_id}  {preview}")
     return 0
@@ -207,15 +275,16 @@ def cmd_eval_retrieval(args: argparse.Namespace) -> int:
         print("Nothing to evaluate yet: fill in questions and gold_evidence first.")
         return 1
 
-    embedder = make_embedder(args.embedder, args.device)
-    indexes = {t: CompanyIndex.load(t, args.chunks_dir, args.index_dir) for t in corpora}
+    config = _retrieval_config(args)
+    name, spec = _variant(args, config)
+    retriever = _open_retriever(args, config, name, spec, sorted(corpora))
 
     def retrieve(ticker: str, question: str, k: int):
-        return [hit.chunk for hit in indexes[ticker].search(embedder, question, k)]
+        return [hit.chunk for hit in retriever.search(ticker, question, k)]
 
-    report = evaluate(questions, corpora, retrieve, embedder.name, ks)
+    report = evaluate(questions, corpora, retrieve, f"{name}: {retriever.description}", ks)
     print(format_report(report))
-    out = args.out or args.results_dir / f"retrieval_{embedder.name.replace('/', '_')}.json"
+    out = args.out or args.results_dir / f"retrieval_{name}.json"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(report.model_dump_json(indent=2) + "\n")
     print(f"Per-question results: {out}")
@@ -384,24 +453,41 @@ def build_parser() -> argparse.ArgumentParser:
     )
     chunk.set_defaults(func=cmd_chunk)
 
-    # Options shared by the commands that embed text.
+    # Options shared by the commands that embed text or retrieve.
     embed_options = argparse.ArgumentParser(add_help=False)
+    embed_options.add_argument("--config", type=Path, default=DEFAULT_COMPANIES_PATH)
     embed_options.add_argument("--chunks-dir", type=Path, default=DEFAULT_CHUNKS_DIR)
     embed_options.add_argument("--index-dir", type=Path, default=DEFAULT_INDEX_DIR)
     embed_options.add_argument(
+        "--retrieval-config",
+        type=Path,
+        default=DEFAULT_RETRIEVAL_CONFIG_PATH,
+        help="retrieval variants (default: config/retrieval.yaml)",
+    )
+    embed_options.add_argument(
+        "--variant", default=None, help="retrieval variant (default: `default` in the config)"
+    )
+    embed_options.add_argument(
         "--embedder",
-        choices=["bge-small", "hashing"],
-        default="bge-small",
-        help="bge-small (real model, needs the [embed] extra) or hashing (offline fake)",
+        choices=list(EMBEDDERS),
+        default=None,
+        help="override the variant's embedder (hashing: offline fake, for smoke runs)",
+    )
+    embed_options.add_argument(
+        "--reranker",
+        choices=list(RERANKERS),
+        default=None,
+        help="override the variant's reranker (overlap: offline fake)",
     )
     embed_options.add_argument(
         "--device", default=None, help="cpu or mps (default: mps if available, else cpu)"
     )
 
     index = subparsers.add_parser(
-        "index", parents=[embed_options], help="build one FAISS index per company from chunks"
+        "index",
+        parents=[embed_options],
+        help="build one FAISS index per company for a retrieval variant (or --variant all)",
     )
-    index.add_argument("--config", type=Path, default=DEFAULT_COMPANIES_PATH)
     index.add_argument("--only", nargs="+", metavar="TICKER", help="limit to tickers")
     index.set_defaults(func=cmd_index)
 
