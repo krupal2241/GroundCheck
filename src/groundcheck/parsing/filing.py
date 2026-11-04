@@ -7,15 +7,19 @@ Output, per company, in `data/parsed/` (gitignored, re-creatable):
 """
 
 import hashlib
+import logging
 from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict
 
 from groundcheck.config import REPO_ROOT, Company, ConfigError
 from groundcheck.edgar.download import DEFAULT_RAW_DIR, filing_path
-from groundcheck.parsing.cleanup import remove_page_furniture
+from groundcheck.parsing.cleanup import remove_page_furniture, remove_repeated_lines
 from groundcheck.parsing.html_text import html_to_text
-from groundcheck.parsing.sections import split_sections
+from groundcheck.parsing.recovery import recover_cross_reference_layout
+from groundcheck.parsing.sections import check_section_sizes, split_sections
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_PARSED_DIR = REPO_ROOT / "data" / "parsed"
 
@@ -27,6 +31,7 @@ class ParsedSection(BaseModel):
     title: str
     text: str
     covers: list[str] = []
+    recovered: bool = False  # relabeled by cross-reference layout recovery
 
 
 class ParsedFiling(BaseModel):
@@ -38,15 +43,36 @@ class ParsedFiling(BaseModel):
     period: str | None
     source_sha256: str
     removed_furniture_blocks: int
+    removed_header_lines: int = 0  # running headers repeated MIN_REPEATS+ times
     front_matter_chars: int
     sections: list[ParsedSection]
     warnings: list[str]
+    notes: list[str] = []  # informational, e.g. which sections were recovered
 
 
 def parse_html(company: Company, html: bytes) -> tuple[ParsedFiling, str]:
-    """Parse one filing's HTML. Returns the parsed filing and the full cleaned text."""
+    """Parse one filing's HTML. Returns the parsed filing and the full cleaned text.
+
+    Steps: HTML → text, page furniture and repeated running headers removed, Item
+    split, size checks, then cross-reference layout recovery. Size warnings describe
+    the split as found; after a recovery the sizes are checked again and any new
+    problem is added, so a warning is never silently dropped.
+    """
+    label = company.ticker
     text, removed = remove_page_furniture(html_to_text(html))
-    result = split_sections(text, label=company.ticker)
+    text, header_lines = remove_repeated_lines(text, label=label)
+    result = split_sections(text, label=label)
+    warnings = list(result.warnings)
+    for message in check_section_sizes(result.sections):
+        logger.warning("%s: %s", label, message)
+        warnings.append(message)
+    recovery = recover_cross_reference_layout(result.sections, label=label, full_text=text)
+    warnings.extend(recovery.warnings)
+    if recovery.notes:
+        for message in check_section_sizes(recovery.sections):
+            if message not in warnings:
+                logger.warning("%s: %s", label, message)
+                warnings.append(message)
     parsed = ParsedFiling(
         ticker=company.ticker,
         accession=company.accession or "",
@@ -54,12 +80,16 @@ def parse_html(company: Company, html: bytes) -> tuple[ParsedFiling, str]:
         period=company.period,
         source_sha256=hashlib.sha256(html).hexdigest(),
         removed_furniture_blocks=removed,
+        removed_header_lines=header_lines,
         front_matter_chars=result.front_matter_chars,
         sections=[
-            ParsedSection(item=s.item, title=s.title, text=s.text, covers=s.covers)
-            for s in result.sections
+            ParsedSection(
+                item=s.item, title=s.title, text=s.text, covers=s.covers, recovered=s.recovered
+            )
+            for s in recovery.sections
         ],
-        warnings=result.warnings,
+        warnings=warnings,
+        notes=recovery.notes,
     )
     return parsed, text
 

@@ -1,7 +1,8 @@
 """The chunk record, the `Chunker` interface, and JSONL input/output.
 
 Every chunker turns a `ParsedFiling` into a list of `Chunk`s. Chunks never cross an
-Item section, and their IDs are deterministic (`<TICKER>-<item>-<p|t><nnnn>`), so the
+Item section, and their IDs are deterministic (`<TICKER>-<item>-<p|t><nnnn>`, plus a
+letter suffix when a window had to be split to fit the token limit), so the
 same parsed filing and chunker settings always produce byte-identical JSONL. That's
 what lets retrieval results and labels refer to chunks by ID.
 """
@@ -27,14 +28,24 @@ class Chunk(BaseModel):
     item: str  # the Item section this chunk comes from: "1", "1A", "7", ...
     section_title: str
     kind: Literal["prose", "table"]
-    index: int  # position among this section's chunks of the same kind
+    index: int  # position among this section's windows of the same kind (split parts share it)
     text: str
     word_count: int
     chunker: str  # e.g. "fixed-p250-o50-t120": the chunker and its settings
 
 
-def chunk_id(ticker: str, item: str, kind: str, index: int) -> str:
-    return f"{ticker}-{item}-{kind[0]}{index:04d}"
+def chunk_id(ticker: str, item: str, kind: str, index: int, part: str = "") -> str:
+    """`AAPL-7-p0003`; a window split to fit the token limit gets `a`, `b`, ... appended."""
+    return f"{ticker}-{item}-{kind[0]}{index:04d}{part}"
+
+
+def part_suffix(i: int) -> str:
+    """0 → "a", ..., 24 → "y", 25 → "za", 26 → "zb", ...: sorts in order, never ambiguous."""
+    return chr(ord("a") + i) if i < 25 else "z" + part_suffix(i - 25)
+
+
+def is_split_part(chunk_id: str) -> bool:
+    return chunk_id[-1].isalpha()
 
 
 class Chunker(Protocol):

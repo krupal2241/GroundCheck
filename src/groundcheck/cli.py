@@ -8,13 +8,20 @@ Subcommands are added as each module is built.
 """
 
 import argparse
+import dataclasses
 import logging
 import sys
 from pathlib import Path
 
 from groundcheck import __version__
-from groundcheck.chunking.base import DEFAULT_CHUNKS_DIR, chunks_path, read_chunks, write_chunks
-from groundcheck.chunking.fixed import FixedSizeChunker
+from groundcheck.chunking.base import (
+    DEFAULT_CHUNKS_DIR,
+    chunks_path,
+    is_split_part,
+    read_chunks,
+    write_chunks,
+)
+from groundcheck.chunking.fixed import DEFAULT_MAX_TOKENS, FixedSizeChunker
 from groundcheck.config import (
     DEFAULT_COMPANIES_PATH,
     ConfigError,
@@ -24,7 +31,11 @@ from groundcheck.config import (
 from groundcheck.edgar.client import SecClient, SecRequestError
 from groundcheck.edgar.download import DEFAULT_RAW_DIR, download_all, resolve_latest_10k
 from groundcheck.parsing.filing import DEFAULT_PARSED_DIR, load_parsed, parse_company
-from groundcheck.retrieval.embedder import BGE_MAX_TOKENS, make_embedder
+from groundcheck.retrieval.embedder import (
+    BGE_MAX_TOKENS,
+    load_bge_token_counter,
+    make_embedder,
+)
 from groundcheck.retrieval.evaluate import (
     DEFAULT_KS,
     DEFAULT_QUESTIONS_PATH,
@@ -73,17 +84,21 @@ def cmd_parse(args: argparse.Namespace) -> int:
         parsed = parse_company(company, args.raw_dir, args.parsed_dir)
         print(
             f"{company.ticker}  {parsed.accession}  page-furniture blocks removed: "
-            f"{parsed.removed_furniture_blocks}, front matter: {parsed.front_matter_chars:,} chars"
+            f"{parsed.removed_furniture_blocks}, repeated header lines removed: "
+            f"{parsed.removed_header_lines}, front matter: {parsed.front_matter_chars:,} chars"
         )
         for section in parsed.sections:
             label = (
                 "Items " + ", ".join(section.covers) if section.covers else f"Item {section.item}"
             )
             words = len(section.text.split())
+            marker = "  recovered=true" if section.recovered else ""
             print(
                 f"  {label:<14} {section.title[:48]:<48} {len(section.text):>9,} chars"
-                f" {words:>8,} words"
+                f" {words:>8,} words{marker}"
             )
+        for message in parsed.notes:
+            print(f"  NOTE: {message}")
         for message in parsed.warnings:
             print(f"  WARNING: {message}")
         total_warnings += len(parsed.warnings)
@@ -96,10 +111,14 @@ def cmd_chunk(args: argparse.Namespace) -> int:
     config = load_companies(args.config)
     companies = [config.get(t) for t in args.only] if args.only else config.companies
     try:
-        chunker = FixedSizeChunker(args.prose_words, args.overlap, args.table_words)
+        settings = (args.prose_words, args.overlap, args.table_words, args.max_tokens)
+        chunker = FixedSizeChunker(*settings)
     except ValueError as exc:
         raise ConfigError(str(exc)) from exc
-    print(f"Chunker: {chunker.name}")
+    count_tokens = load_bge_token_counter() if args.tokenizer == "bge-small" else None
+    chunker = dataclasses.replace(chunker, count_tokens=count_tokens)
+    limit = f", max {chunker.max_tokens} tokens" if count_tokens else ", no token limit"
+    print(f"Chunker: {chunker.name}{limit}")
     for company in companies:
         chunks = chunker.chunk(load_parsed(company.ticker, args.parsed_dir))
         path = chunks_path(company.ticker, args.chunks_dir)
@@ -107,10 +126,19 @@ def cmd_chunk(args: argparse.Namespace) -> int:
         prose = [c for c in chunks if c.kind == "prose"]
         tables = [c for c in chunks if c.kind == "table"]
         longest = max((c.word_count for c in chunks), default=0)
+        tokens = ""
+        if count_tokens:
+            counts = [count_tokens(c.text) for c in chunks]
+            parts = sum(is_split_part(c.chunk_id) for c in chunks)
+            tokens = f", {max(counts, default=0)} tokens; {parts} split part(s)"
         print(
             f"  {company.ticker:<6} {len(prose):>5} prose + {len(tables):>5} table chunks, "
-            f"longest {longest} words -> {path}"
+            f"longest {longest} words{tokens} -> {path}"
         )
+        if count_tokens:
+            for chunk, n in zip(chunks, counts, strict=True):
+                if n > chunker.max_tokens:  # only a single unsplittable "word" gets here
+                    print(f"  WARNING: {chunk.chunk_id} still has {n} tokens")
     return 0
 
 
@@ -234,6 +262,19 @@ def build_parser() -> argparse.ArgumentParser:
     chunk.add_argument("--prose-words", type=int, default=250)
     chunk.add_argument("--overlap", type=int, default=50)
     chunk.add_argument("--table-words", type=int, default=120)
+    chunk.add_argument(
+        "--max-tokens",
+        type=int,
+        default=DEFAULT_MAX_TOKENS,
+        help=f"split any chunk over this many tokens (default {DEFAULT_MAX_TOKENS})",
+    )
+    chunk.add_argument(
+        "--tokenizer",
+        choices=["bge-small", "none"],
+        default="bge-small",
+        help="count tokens with bge-small's tokenizer (needs the [embed] extra), or "
+        "none to skip the token limit",
+    )
     chunk.set_defaults(func=cmd_chunk)
 
     # Options shared by the commands that embed text.

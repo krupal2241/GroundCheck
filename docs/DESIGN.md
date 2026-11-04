@@ -269,7 +269,8 @@ and short (≤120 characters) running footers that mention `10-K` and start or e
 a page number (`Apple Inc. | 2025 Form 10-K | 23`). Item headings and tables are never
 removed. *Alternative:* drop any short line repeated on many pages. That's more
 general, but it could also drop a repeated real sentence, and it needs the real
-filings to tune.
+filings to tune. (Added on Day 8, tuned on what the real filings showed: see
+"Parse hardening" below.)
 
 **Rowspan** (`html_text.py`): cells are placed on a column grid. A cell with
 `rowspan=N` occupies its columns in the next N-1 rows too, so those rows' cells start
@@ -277,13 +278,13 @@ further right and stay aligned. Its text appears only in its first row, so a val
 never shown as reported twice.
 
 **Known gaps** (to check with the real filings):
-- JPM's 10-K is mostly its annual report plus a "Form 10-K cross-reference index", so
-  it may not have normal Item headings. Expect missing-Item warnings there; that's the
-  tripwire working, not a crash. Fixing it would mean mapping the index's page numbers.
+- ~~JPM's 10-K is mostly its annual report plus a "Form 10-K cross-reference index"~~.
+  It did parse, but into stubs (Item 7: 396 chars) and one giant Item 15. Handled on
+  Day 8 by cross-reference layout recovery, without mapping page numbers: see below.
 - Headings split across two blocks *before* the item number (e.g. `ITEM` and `7.` in
   separate `<div>`s) aren't recognized.
 - Footers that don't mention `10-K` and aren't a bare number (e.g. only the company
-  name) are kept.
+  name) are kept, unless they repeat 8+ times (Day 8, repeated-line removal).
 
 ## Chunking (`chunking/`), Day 5
 
@@ -318,7 +319,9 @@ fake or experimental chunkers in tests don't have to import anything.
 **Why word counts:** bge-small's limit is 512 tokens, and English prose runs about
 1.3 tokens per word, so 250 words is roughly 330 tokens, comfortably under the limit.
 The tokenizer isn't available in the sandbox, so `groundcheck index` counts real
-tokens on your machine and reports any chunk that would be truncated.
+tokens on your machine and reports any chunk that would be truncated. That check found
+number-dense windows at 520 to 632 tokens, so since Day 8 `chunk` also enforces a
+480-token cap with the real tokenizer (see "Token-safe chunks" below).
 
 **JSONL output** is written with a fixed key order and `ensure_ascii=False` (curly
 quotes stay readable), atomically via a `.part` file. Re-writing the same chunks gives
@@ -423,3 +426,139 @@ output the chunks do. A table row boundary counts as whitespace.
 than an index. Tests pass a fake retriever that returns chunks in a fixed order, so
 each metric can be checked by hand. The CLI test runs the whole path (parse → chunk →
 index → eval) with the hashing embedder.
+
+## Parse hardening and token-safe chunks (Day 8)
+
+The first real run on the Mac showed four problems the synthetic fixtures couldn't:
+two filings (JPM, XOM) put MD&A and the financial statements outside Items 7 and 8,
+running page headers survived cleanup, and some 250-word windows were over the token
+limit. Each fix below is covered by synthetic fixtures that copy the real patterns
+(`tests/fixtures/parsing/build_xref_fixtures.py` writes `xref_bank_style.htm`, JPM's
+layout, and `xref_energy_style.htm`, XOM's). They still need checking on the real
+filings (see the PR for the commands).
+
+### Section-size warnings (`sections.py`, `check_section_sizes`)
+
+**What:** besides missing Items, `parse` now warns when Item 1, 1A, 7 or 8 is under
+1,500 characters, and when any *other* Item is over 60,000. The thresholds sit in one
+commented block (`KEY_ITEMS`, `MIN_KEY_SECTION_CHARS`, `MAX_OTHER_SECTION_CHARS`). The
+warnings are stored in the JSON and counted in the final "N warning(s)" line.
+
+**Why these numbers:** they sit in wide gaps in the real data. The stubs that must
+warn are 265 to 710 characters (JPM Items 7 and 8, XOM Items 7 and 8); the smallest
+real key section is far above 1,500. The oversized sections that must warn are
+342,034 (XOM Item 16) and 1,050,977 (JPM Item 15); the largest legitimate non-key
+section seen is XOM Item 2 at 40,860. Key Items are exempt from the upper limit
+because they really are long: JNJ Item 8 is 227,361 and BRK-B Item 1 is 126,647. An
+"Items 1 and 2" section counts as key.
+
+**Why warn on the split as found, even after a recovery:** the warning is the evidence
+that the layout was unusual, and the recovery is a heuristic you should check. So the
+size warnings describe the split before recovery, and after a recovery the sizes are
+checked again and any *new* problem is added too. Nothing that fired is silently
+dropped. *Alternative:* only report sizes after recovery. That hides the fact that
+JPM's sections were rebuilt.
+
+### Repeated running headers (`cleanup.py`, `remove_repeated_lines`)
+
+**What:** after the pattern-based furniture removal and before the Item split, any
+line of at most 120 characters that occurs at least 8 times in the filing (compared
+case-insensitively, ignoring surrounding whitespace) is removed. JPM prints
+"Management's discussion and analysis" at the top of every MD&A page; XOM prints
+"MANAGEMENT'S DISCUSSION AND ANALYSIS OF FINANCIAL CONDITION AND RESULTS OF
+OPERATIONS" every 20 to 40 lines. Left in, these lines end up in dozens of chunks and
+pull MD&A chunks toward any question that mentions MD&A.
+
+**The heading is kept:** for each repeated line, the first occurrence that is
+*followed by prose* stays, because that one is the real section heading (and Part C
+needs it). "Followed by prose" means a paragraph (at least 100 characters and 15 words,
+not a heading) within the next 4 blocks, passing over subheadings and data tables (XOM's
+MD&A heading is followed by "FUNCTIONAL EARNINGS SUMMARY" and a table), but not over a
+table of contents. *Decision:* the spec said "keep the first occurrence if it is a
+heading". Taking the first occurrence *that is* a heading is a small generalization: if
+the first one is a table-of-contents line, the real heading further on survives
+instead of every copy being dropped.
+
+**What is never removed:** tables (a repeated `Total | ...` row is data), Item headings
+(the splitter needs every copy to tell TOC from section), and lines over 120
+characters. Each removed line and its count is logged at INFO (`groundcheck -v parse`)
+and the total is printed as "repeated header lines removed". *Risk:* a short real line
+that genuinely repeats 8+ times (e.g. a footnote like "(a) Refer to Note 2.") is also
+removed. The INFO log lists every removed line so this can be checked per filing.
+
+**Why a table of contents needs page numbers in order:** a table whose rows mostly end
+in a 1 to 3 digit number is a TOC only if there are at least two such rows and the
+numbers never go down. A data table's last column (`Upstream | 412`) jumps around.
+
+### Cross-reference layout recovery (`recovery.py`)
+
+**What:** some filers print Items 7 and 8 as pointers ("see pages 50-160", "Reference
+is made to ... the Financial Section"), and the real MD&A and financial statements sit
+later, inside whatever Item heading precedes them: JPM's annual report lands in Item
+15, XOM's Financial Section in Item 16 (after the signatures). Recovery relabels those
+spans as Items 7 and 8.
+
+**Trigger:** Item 7 or 8 is a stub (under 1,500) *and* a later non-key section is over
+60,000. Inside the largest such section:
+1. *MD&A start:* the first line with no `|` that contains "Management's discussion and
+   analysis" (JPM) or "MANAGEMENT'S DISCUSSION AND ANALYSIS OF FINANCIAL CONDITION AND
+   RESULTS OF OPERATIONS" (XOM), either apostrophe, and is followed by prose. The line
+   is either the heading itself or a paragraph that opens with the phrase (within the
+   first 40 characters, as in JPM's "The following is Management's discussion and
+   analysis ..."). A paragraph that cites a page ("see Management's discussion and
+   analysis on pages 50-160") never counts.
+2. *Financial statements start:* the first line with no `|`, after the MD&A start, equal
+   to "Report of Independent Registered Public Accounting Firm".
+
+Table-of-contents rows can never be starts: every row of a `[TABLE]` (and any line
+with a `|`) is skipped, which covers JPM's cross-reference index and XOM's
+"Report of Independent Registered Public Accounting Firm | 69".
+
+**Result:** MD&A start → financial statements start is Item 7; financial statements
+start → the end of the oversized section is Item 8 ("Financial Statements and
+Supplementary Data", so the notes and supplementary schedules belong there); the
+oversized section keeps only what came before the MD&A start. The stubs' own text is
+kept at the top of the recovered sections, so no text is dropped and chunk IDs stay
+unique (one Item 7, one Item 8). Recovered sections have `recovered: true` in the JSON
+and `recovered=true` in `parse` output, and a NOTE line says where each starts (line
+number in `<TICKER>.txt` and the first 80 characters), which is what to check on the
+real filings.
+
+**When it gives up:** if either start isn't found, or Item 7 or 8 is already a full
+section (it would be overwritten), nothing changes and a WARNING naming the filing is
+logged, stored and counted. *Alternative:* map the cross-reference index's page numbers
+to the text. That needs page boundaries, which `html_to_text` doesn't keep, and every
+filer formats the index differently; two anchor lines are easier to check and fail
+loudly.
+
+### Token-safe chunks (`chunking/fixed.py`)
+
+**What:** no chunk may exceed 480 tokens as counted by bge-small's tokenizer (special
+tokens included). On the Mac, JNJ-1-p0001, JNJ-1-p0003, JNJ-8-p0097, WMT-3-p0001 and
+WMT-3-p0002 were 520 to 632 tokens at 250 words: number-dense text runs well over 1.3
+tokens per word. `FixedSizeChunker` takes an optional `count_tokens` function and
+`max_tokens` (default 480, leaving headroom under the model's 512). `groundcheck chunk`
+loads the real tokenizer (only the tokenizer, via `transformers`, from the `[embed]`
+extra); `--tokenizer none` skips the cap (no extra needed), and tests pass a fake
+counter, so CI never downloads anything.
+
+**How a chunk is split:** only when its count is over the cap. The 250-word default
+and the 200-word step are unchanged.
+- *Prose* is cut at the sentence end nearest the middle (searching the middle third;
+  "U.S.", "Inc.", "No." and initials don't count as sentence ends), else at the middle
+  word. The second part starts 50 words (the configured overlap) before the cut, so a
+  fact at the cut is whole in one part. Repeat until every part fits. The window's
+  first and last words don't move, so the overlap with neighbouring windows is kept.
+- *Tables* are cut between rows (each part repeats the header), and a single row that
+  is still too long is cut between words. No overlap, as before.
+- A single "word" longer than the cap can't be split; `chunk` prints a WARNING for it.
+
+**IDs stay stable and unique:** a split window keeps its ID with a letter appended
+(`JNJ-1-p0001a`, `JNJ-1-p0001b`) and its parts share the window's `index`. Every window
+that wasn't split keeps exactly the ID and text it had before, so labels and results
+that cite those IDs stay valid. The chunker name gains `-k480` when the cap is on
+(`fixed-p250-o50-t120-k480`), so an index built from capped chunks says so. *Alternative:*
+renumber all windows after a split. Simpler IDs, but every later chunk ID in the
+section shifts. *Alternative:* token-based windows everywhere. That changes every
+chunk, not only the five that were too long.
+

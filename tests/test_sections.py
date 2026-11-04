@@ -243,7 +243,8 @@ def test_existing_fixtures_report_missing_items(caplog):
     with caplog.at_level(logging.WARNING):
         parsed, _ = parse_html(company, (FIXTURES / "workiva_style.htm").read_bytes())
     assert [s.item for s in parsed.sections] == ["7"]
-    assert parsed.warnings == ["missing Item 1", "missing Item 1A", "missing Item 8"]
+    assert parsed.warnings[:3] == ["missing Item 1", "missing Item 1A", "missing Item 8"]
+    assert parsed.warnings[3].startswith("Item 7 is only")  # a fragment, so a stub
     assert "Example Corp | 2025 Form 10-K | 23" in html_to_text(
         (FIXTURES / "workiva_style.htm").read_bytes()
     )

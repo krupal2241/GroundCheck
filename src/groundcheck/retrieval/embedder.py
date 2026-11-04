@@ -13,6 +13,7 @@ All vectors are float32 and L2-normalized, so the inner product FAISS computes
 
 import hashlib
 import re
+from collections.abc import Callable
 from typing import Protocol
 
 import numpy as np
@@ -124,6 +125,26 @@ class BgeEmbedder:
         """Real token counts (with special tokens), to find chunks that get truncated."""
         tokenizer = self.model.tokenizer
         return [len(tokenizer(t, add_special_tokens=True)["input_ids"]) for t in texts]
+
+
+def load_bge_token_counter(model_name: str = BGE_MODEL) -> Callable[[str], int]:
+    """A function counting a text's bge tokens (special tokens included), as the model
+    sees them. Only the tokenizer files are loaded (a few hundred KB, cached by Hugging
+    Face after the first download), not the model."""
+    try:
+        from transformers import AutoTokenizer
+    except ImportError as exc:
+        raise ConfigError(
+            'counting tokens needs the [embed] extra: pip install -e ".[embed]" '
+            "(or pass --tokenizer none to skip the token limit)"
+        ) from exc
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+
+    def count(text: str) -> int:
+        # verbose=False: no "sequence length is longer than ..." warning per long text.
+        return len(tokenizer(text, add_special_tokens=True, verbose=False)["input_ids"])
+
+    return count
 
 
 def make_embedder(kind: str, device: str | None = None) -> Embedder:

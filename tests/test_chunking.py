@@ -1,7 +1,21 @@
+import re
+
 import pytest
 
-from groundcheck.chunking.base import Chunker, chunks_path, read_chunks, write_chunks
-from groundcheck.chunking.fixed import FixedSizeChunker, header_row_count
+from groundcheck.chunking.base import (
+    Chunker,
+    chunks_path,
+    is_split_part,
+    part_suffix,
+    read_chunks,
+    write_chunks,
+)
+from groundcheck.chunking.fixed import (
+    FixedSizeChunker,
+    header_row_count,
+    is_sentence_end,
+    sentence_cut,
+)
 from groundcheck.config import ConfigError
 from groundcheck.parsing.filing import ParsedFiling, ParsedSection
 
@@ -139,6 +153,125 @@ def test_chunk_ids_are_deterministic_and_unique():
 def test_fixed_chunker_satisfies_protocol():
     chunker: Chunker = FixedSizeChunker()
     assert chunker.name.startswith("fixed-")
+
+
+# --- token limit (Part D) --------------------------------------------------------------
+# A fake tokenizer stands in for bge's, so no model or network is needed. Like a
+# WordPiece tokenizer, it charges extra for digits and punctuation, so number-dense
+# text costs more tokens per word than plain prose.
+
+
+def fake_tokens(text: str) -> int:
+    """[CLS] + [SEP], one token per word, plus one per digit group and punctuation mark."""
+    return 2 + len(text.split()) + len(re.findall(r"\d+|[^\w\s]", text))
+
+
+def dense(n: int) -> str:
+    """Number-dense prose like JNJ Item 1: `$12.3` costs 5 fake tokens per word."""
+    sentence = "Sales were $12.3 billion, up 4.5% from $11.8 billion in 2024."
+    out = []
+    while len(out) < n:
+        out.extend(sentence.split())
+    return " ".join(out[:n])
+
+
+def plain(n: int) -> str:
+    """Letter-only words: one fake token each."""
+    return " ".join((["the", "results", "of", "the", "year", "were", "good"] * n)[:n])
+
+
+TOKEN_LIMITED = FixedSizeChunker(count_tokens=fake_tokens)
+
+
+def test_long_windows_are_split_and_ids_get_a_suffix():
+    # 250 number-dense words cost ~590 fake tokens, like JNJ-1-p0001 (632 real tokens).
+    f = filing(("1", plain(250) + " " + dense(600)))
+    assert fake_tokens(TOKEN_LIMITED.prose_windows(dense(250))[0]) > 520
+    chunks = TOKEN_LIMITED.chunk(f)
+    assert all(fake_tokens(c.text) <= 480 for c in chunks)
+    ids = [c.chunk_id for c in chunks]
+    assert ids[0] == "EXCO-1-p0000"  # plain words fit: ID unchanged
+    assert "EXCO-1-p0001a" in ids and "EXCO-1-p0001b" in ids
+    assert len(set(ids)) == len(ids)
+    assert [c.index for c in chunks if c.chunk_id.startswith("EXCO-1-p0001")] == [1, 1]
+
+
+def test_split_keeps_the_overlap_and_loses_nothing():
+    text = dense(250)
+    parts = TOKEN_LIMITED.fit_prose(text)
+    assert len(parts) == 2
+    first, second = parts[0].split(), parts[1].split()
+    assert first[-50:] == second[:50]  # the configured 50-word overlap
+    assert first + second[50:] == text.split()
+
+
+def test_split_prefers_a_sentence_boundary():
+    parts = TOKEN_LIMITED.fit_prose(dense(250))
+    assert parts[0].endswith("2024.")  # cut after a sentence, not mid-sentence
+
+
+def test_without_a_counter_or_when_everything_fits_nothing_changes():
+    f = filing(("1", words(600)), ("7", dense(300) + "\n\n" + table(["| 2025"], 5)))
+    plain = FixedSizeChunker().chunk(f)
+    roomy = FixedSizeChunker(max_tokens=5_000, count_tokens=fake_tokens).chunk(f)
+    assert [c.chunk_id for c in roomy] == [c.chunk_id for c in plain]
+    assert [c.text for c in roomy] == [c.text for c in plain]
+    assert plain[0].chunker == "fixed-p250-o50-t120"
+    assert roomy[0].chunker == "fixed-p250-o50-t120-k5000"
+    assert not any(is_split_part(c.chunk_id) for c in plain)
+
+
+def test_unsplit_ids_are_stable_when_another_window_splits():
+    f = filing(("1", plain(400) + " " + dense(250) + " " + plain(400)))
+    baseline = {c.chunk_id: c.text for c in FixedSizeChunker().chunk(f)}
+    limited = {c.chunk_id: c.text for c in TOKEN_LIMITED.chunk(f)}
+    for chunk_id, text in limited.items():
+        if not is_split_part(chunk_id):
+            assert baseline[chunk_id] == text
+    split = {i[:-1] for i in limited if is_split_part(i)}
+    assert split and split <= set(baseline) and not split & set(limited)
+
+
+def test_tables_over_the_token_limit_split_between_rows():
+    header = ["| 2025 | 2024 | 2023"]
+    rows = [f"Segment {r} | $1,{r:03d}.5 | $(2,{r:03d}) | 3.{r}%" for r in range(12)]
+    t = "\n".join(["[TABLE]", *header, *rows, "[/TABLE]"])
+    chunker = FixedSizeChunker(max_tokens=120, count_tokens=fake_tokens)
+    pieces = chunker.table_pieces(t)
+    assert len(pieces) > 1
+    assert all(fake_tokens(p) <= 120 for p in pieces)
+    assert all(p.split("\n")[1] == header[0] for p in pieces)  # header repeated
+    assert [r for p in pieces for r in p.split("\n")[2:-1]] == rows  # rows whole, in order
+    chunks = chunker.chunk(filing(("8", t)))
+    assert [c.chunk_id for c in chunks][:2] == ["EXCO-8-t0000a", "EXCO-8-t0000b"]
+
+
+def test_one_huge_row_splits_between_words_and_a_giant_word_is_left_alone():
+    chunker = FixedSizeChunker(max_tokens=40, count_tokens=fake_tokens)
+    pieces = chunker.fit_table(["| 2025"], ["Huge | " + words(100)])
+    assert len(pieces) > 1 and all(fake_tokens(p) <= 40 for p in pieces)
+    assert chunker.fit_prose("x" * 10 + "." * 50) == ["x" * 10 + "." * 50]
+
+
+def test_sentence_boundaries():
+    assert is_sentence_end("2024.") and is_sentence_end("growth.”") and is_sentence_end("why?")
+    for word in ("U.S.", "Inc.", "No.", "e.g.", "J.", "billion,"):
+        assert not is_sentence_end(word)
+    words_ = ["one", "two", "three.", "Four", "five", "six", "seven", "eight", "nine", "ten"]
+    assert sentence_cut(words_) == 3
+    assert sentence_cut(["a", "b", "c", "d", "e", "f"]) == 3  # no boundary: the middle
+    assert sentence_cut(["a", "b"]) == 1
+
+
+def test_part_suffixes_sort_and_never_collide():
+    suffixes = [part_suffix(i) for i in range(80)]
+    assert suffixes[:3] == ["a", "b", "c"] and suffixes[25] == "za"
+    assert suffixes == sorted(suffixes) and len(set(suffixes)) == 80
+
+
+def test_max_tokens_must_be_sensible():
+    with pytest.raises(ValueError):
+        FixedSizeChunker(max_tokens=5)
 
 
 # --- JSONL ----------------------------------------------------------------------------
