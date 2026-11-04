@@ -251,7 +251,7 @@ def test_hf_verifiers_without_the_extra_are_a_clean_error(monkeypatch, name):
 
 
 def test_factory_names_and_unknown():
-    assert VERIFIER_NAMES == ("fake", "prompted", "minicheck", "hhem")
+    assert VERIFIER_NAMES == ("fake", "prompted", "minicheck", "hhem", "finetuned")
     assert isinstance(make_verifier("fake"), FakeVerifier)
     with pytest.raises(VerifierError, match="unknown verifier"):
         make_verifier("oracle")

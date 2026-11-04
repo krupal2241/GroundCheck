@@ -8,6 +8,7 @@ lexical rule, so tests can predict the outcome.
 
 import sys
 import types
+from pathlib import Path
 
 import numpy as np
 
@@ -151,4 +152,75 @@ def install(monkeypatch, cuda=False, mps=False, id2label=None, three_way=False):
     monkeypatch.setitem(
         sys.modules, "transformers", make_transformers(recorder, id2label, three_way)
     )
+    return recorder
+
+
+def install_training(monkeypatch, cuda=False):
+    """Stand-ins for the parts of transformers that training.train uses. The fake
+    Trainer 'learns' perfectly: evaluate() returns one-hot logits of the true labels."""
+    import json as _json
+
+    recorder = Recorder()
+    recorder.seeds, recorder.args, recorder.trainer = [], {}, {}
+    transformers = types.ModuleType("transformers")
+    transformers.__version__ = "4.50.0-standin"
+
+    class Tokenizer:
+        @classmethod
+        def from_pretrained(cls, name, **kwargs):
+            recorder.loads.append(("AutoTokenizer", name, kwargs))
+            return cls()
+
+        def __call__(self, first, second=None, **kwargs):
+            recorder.tokenized.append((first, second, kwargs))
+            ids = list(range(min(len(first.split()) + len((second or "").split()), 8)))
+            return {"input_ids": ids, "attention_mask": [1] * len(ids)}
+
+        def save_pretrained(self, path):
+            (Path(path) / "tokenizer_config.json").write_text("{}")
+
+    class Model:
+        def __init__(self, kwargs):
+            self.kwargs = kwargs
+
+        @classmethod
+        def from_pretrained(cls, name, **kwargs):
+            recorder.loads.append(("AutoModelForSequenceClassification", name, kwargs))
+            return cls(kwargs)
+
+    class TrainingArguments:
+        def __init__(self, **kwargs):
+            recorder.args.update(kwargs)
+            self.__dict__.update(kwargs)
+
+    class Trainer:
+        def __init__(self, **kwargs):
+            recorder.trainer.update(kwargs)
+            self.model, self.compute_metrics = kwargs["model"], kwargs["compute_metrics"]
+
+        def train(self):
+            return types.SimpleNamespace(training_loss=0.42)
+
+        def evaluate(self, dataset, metric_key_prefix="eval"):
+            labels = np.array([row["labels"] for row in dataset.rows])
+            logits = np.eye(3)[labels]
+            metrics = self.compute_metrics(
+                types.SimpleNamespace(predictions=logits, label_ids=labels)
+            )
+            out = {f"{metric_key_prefix}_{k}": v for k, v in metrics.items()}
+            out[f"{metric_key_prefix}_loss"] = 0.1
+            return out
+
+        def save_model(self, path):
+            config = {"id2label": {str(k): v for k, v in self.model.kwargs["id2label"].items()}}
+            (Path(path) / "config.json").write_text(_json.dumps(config))
+
+    transformers.AutoTokenizer = Tokenizer
+    transformers.AutoModelForSequenceClassification = Model
+    transformers.TrainingArguments = TrainingArguments
+    transformers.Trainer = Trainer
+    transformers.DataCollatorWithPadding = lambda tokenizer: ("collator", tokenizer)
+    transformers.set_seed = recorder.seeds.append
+    monkeypatch.setitem(sys.modules, "torch", make_torch(cuda=cuda))
+    monkeypatch.setitem(sys.modules, "transformers", transformers)
     return recorder

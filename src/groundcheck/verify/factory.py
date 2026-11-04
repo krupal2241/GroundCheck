@@ -4,6 +4,7 @@
     prompted   a local LLM through the provider layer (Ollama by default)
     minicheck  lytang/MiniCheck-DeBERTa-v3-Large    ([verifiers] extra)
     hhem       vectara/hallucination_evaluation_model ([verifiers] extra)
+    finetuned  a model trained by scripts/train_verifier.py, from a local path
 
 The prompted verifier's provider is built by `llm.factory.make_provider`, so the
 paid-call guard applies to it as to everything else.
@@ -17,7 +18,7 @@ from groundcheck.config import LLMConfig, load_llm_config
 from groundcheck.llm.base import LLMRequest
 from groundcheck.verify.base import Verifier, VerifierError
 
-VERIFIER_NAMES = ("fake", "prompted", "minicheck", "hhem")
+VERIFIER_NAMES = ("fake", "prompted", "minicheck", "hhem", "finetuned")
 
 
 @dataclass
@@ -31,6 +32,7 @@ class VerifierOptions:
     use_cache: bool = False  # prompted: off by default, so latency is real
     model: str | None = None  # minicheck / hhem: override the Hub model ID
     revision: str | None = None  # minicheck / hhem: pin a Hub commit
+    finetuned_path: Path | None = None
     device: str | None = None  # cpu, mps or cuda; default: auto
     threshold: float = 0.5  # binary verifiers: P(supported) needed for "supported"
 
@@ -74,4 +76,10 @@ def make_verifier(name: str, options: VerifierOptions | None = None) -> Verifier
         return HHEMVerifier(
             options.model or HHEM_MODEL, options.device, options.threshold, options.revision
         )
+    if name == "finetuned":
+        if options.finetuned_path is None:
+            raise VerifierError("the finetuned verifier needs --finetuned-path <model dir>")
+        from groundcheck.verify.finetuned import FineTunedVerifier
+
+        return FineTunedVerifier(options.finetuned_path, options.device)
     raise VerifierError(f"unknown verifier {name!r}; choose from {', '.join(VERIFIER_NAMES)}")

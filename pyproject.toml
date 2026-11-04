@@ -49,6 +49,15 @@ verifiers = [
     "transformers>=4.43",
 ]
 
+# Fine-tuning the small verifier (scripts/train_verifier.py, best on a Colab GPU).
+train = [
+    "accelerate>=0.26",
+    "protobuf>=4.25",
+    "sentencepiece>=0.2",
+    "torch>=2.2",
+    "transformers>=4.43",
+]
+
 [project.scripts]
 groundcheck = "groundcheck.cli:main"
 

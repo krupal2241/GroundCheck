@@ -58,6 +58,12 @@ from groundcheck.retrieval.evaluate import (
     load_questions,
 )
 from groundcheck.retrieval.index import DEFAULT_INDEX_DIR, CompanyIndex, build_company_index
+from groundcheck.training.data import (
+    DEFAULT_TRAINING_CONFIG,
+    DEFAULT_TRAINING_DIR,
+    build_training_data,
+    load_training_config,
+)
 from groundcheck.verify.base import VerifierError
 from groundcheck.verify.costs import DEFAULT_PRICES_PATH, load_prices
 from groundcheck.verify.evaluate import DEFAULT_RESULTS_DIR, evaluate_verifiers, load_gold
@@ -315,6 +321,7 @@ def verifier_options(args: argparse.Namespace) -> VerifierOptions:
         revision=args.revision,
         device=args.device,
         threshold=args.threshold,
+        finetuned_path=args.finetuned_path,
     )
 
 
@@ -344,6 +351,35 @@ def cmd_eval_verifiers(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_build_training_data(args: argparse.Namespace) -> int:
+    config = load_training_config(args.training_config)
+    gold_paths = [args.gold, args.labels]
+    manifest = build_training_data(
+        args.chunks_dir, args.out_dir, config, gold_paths, args.candidates_dir
+    )
+    for problem in manifest["companies_in_config_without_chunks"]:
+        print(f"WARNING: {problem} is in {args.training_config or 'config/training.yaml'} "
+              "but has no chunks")  # fmt: skip
+    if not (manifest["gold_claims_excluded"] or manifest["candidate_chunks_excluded"]):
+        print(
+            "WARNING: found no gold labels, label file or candidates to exclude. That is "
+            "only right if nothing has been labeled yet; otherwise check --gold, --labels "
+            "and --candidates-dir before training."
+        )
+    print(
+        f"Excluded {manifest['gold_claims_excluded']} gold claim(s), "
+        f"{manifest['gold_chunks_excluded']} gold chunk(s) and "
+        f"{manifest['candidate_chunks_excluded']} other candidate chunk(s)."
+    )
+    for split, counts in manifest["counts_by_split_and_label"].items():
+        total = sum(counts.values())
+        detail = ", ".join(f"{k} {v}" for k, v in sorted(counts.items()))
+        print(f"  {split:<5} {total:>6} example(s)  {detail}")
+    print(f"By rule: {manifest['counts_by_rule']}")
+    print(f"Wrote {args.out_dir}/{{train,dev,test}}.jsonl and manifest.json")
+    return 0
+
+
 def add_verifier_options(parser: argparse.ArgumentParser) -> None:
     """Options for building verifiers (and the prompted verifier's LLM)."""
     add_llm_options(parser)
@@ -364,6 +400,12 @@ def add_verifier_options(parser: argparse.ArgumentParser) -> None:
         type=float,
         default=0.5,
         help="binary verifiers: P(supported) needed to say supported (default 0.5)",
+    )
+    parser.add_argument(
+        "--finetuned-path",
+        type=Path,
+        default=None,
+        help="finetuned: the model directory written by scripts/train_verifier.py",
     )
 
 
@@ -566,6 +608,32 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_verifier_options(eval_verifiers)
     eval_verifiers.set_defaults(func=cmd_eval_verifiers)
+
+    training = subparsers.add_parser(
+        "build-training-data",
+        help="synthetic verifier training data from chunks (gold set excluded, split by company)",
+    )
+    training.add_argument("--chunks-dir", type=Path, default=DEFAULT_CHUNKS_DIR)
+    training.add_argument("--out-dir", type=Path, default=DEFAULT_TRAINING_DIR)
+    training.add_argument(
+        "--training-config",
+        type=Path,
+        default=None,
+        help=f"splits and sizes (default {DEFAULT_TRAINING_CONFIG.name})",
+    )
+    training.add_argument(
+        "--gold", type=Path, default=DEFAULT_EXPORT_PATH, help="gold labels to exclude"
+    )
+    training.add_argument(
+        "--labels", type=Path, default=DEFAULT_LABELS_PATH, help="label file to exclude too"
+    )
+    training.add_argument(
+        "--candidates-dir",
+        type=Path,
+        default=DEFAULT_CANDIDATES_DIR,
+        help="every chunk retrieved for a candidate is excluded as well",
+    )
+    training.set_defaults(func=cmd_build_training_data)
     return parser
 
 

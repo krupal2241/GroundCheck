@@ -1,0 +1,25 @@
+# Synthetic training data for the fine-tuned verifier (`groundcheck build-training-data`).
+#
+# Splits are BY COMPANY: all of a company's examples go to one split, and unsupported
+# pairs that borrow evidence from another company stay within the split.
+#
+# The hand-labeled gold set never enters training, whatever is listed here: every chunk
+# that was retrieved for a candidate (all gold passages included) and every gold claim
+# are excluded in code (see docs/DESIGN.md, Part 3).
+#
+# Default: JPM and BRK-B (not in the labeled set) plus AAPL and MSFT train; AMZN is the
+# dev set for model selection; WMT, XOM and JNJ are never seen in training at all, so
+# their rows in the eval-verifiers by-company table measure unseen companies.
+
+seed: 13
+splits:
+  train: [JPM, BRK-B, AAPL, MSFT]
+  dev: [AMZN]
+  test: [WMT, XOM, JNJ]
+
+max_seeds_per_company: 1500   # supported seeds sampled per company (each gives up to 3 examples)
+supported_rewrite_rate: 0.5   # share of supported examples that are reworded (synonym / rescale)
+other_company_rate: 0.5       # share of unsupported examples whose evidence is another company's
+partner_candidates: 60        # chunks sampled when picking an unsupported partner
+min_words: 8                  # prose sentences used as seeds: 8 to 45 words
+max_words: 45

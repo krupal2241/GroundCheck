@@ -974,3 +974,91 @@ stated next to the number.
 loaded faiss for every command, so `eval-verifiers --verifier hhem` would have loaded
 faiss and then torch, which is the OpenMP clash from Part 0. Now faiss loads only
 when an index is built or read.
+
+## Training data and fine-tuning (`training/`, `build-training-data`, `scripts/train_verifier.py`), Part 3
+
+PLAN.md's Weeks 1–2 scope says "no fine-tuning", so it specifies nothing here; this
+part follows the brief directly.
+
+**Seeds: supported pairs from the chunks themselves** (`training/data.py`). A prose
+sentence of 8–45 words is supported by its own chunk; one numeric cell per table row
+becomes a templated claim, "<row label> was <value> for <column header>.", supported by
+its table chunk. Up to 1,500 seeds per company are sampled with a fixed seed.
+*Why not the LLM-generated candidate claims:* they are exactly the claims that get
+hand-labeled, so they are the evaluation set's distribution and may not be used.
+
+**From each seed, up to three examples** (rules in `training/perturb.py`):
+
+| Label | How | Rules |
+|---|---|---|
+| supported | the seed, or for half of them a meaning-preserving rewrite | `seed`, `synonym` (increased -> rose), `rescale` ($12,345 million -> $12.3 billion) |
+| contradicted | one perturbation of the claim, evidence unchanged | `numeric`, `scale`, `negation`, `year_swap`, `entity_swap` |
+| unsupported | the unchanged claim with a different chunk | `other_section` (same company, other Item), `other_company` (same split) |
+
+Guards against producing the wrong label: a changed number must not occur anywhere in
+the evidence (else another cell might support it); a year is only swapped for *another
+year present in the evidence*, because per the labeling guide a value on the wrong
+period is contradicted but a period the chunks don't cover is unsupported; a table row
+label is only swapped for a row whose values differ from the claim's numbers;
+`rescale` rounds to the claim's one decimal, which the PLAN.md rounding rule calls
+supported, while `scale` (million <-> billion without rescaling) is the contradicted
+units/scale case. The unsupported partner is the most word-similar of 60 sampled
+chunks that contains none of the claim's numbers and not the claim itself: on topic
+(hard) but unable to back it. *Known noise:* negation by inserting "not" can produce
+an odd sentence; a name swapped in prose may also be mentioned in the evidence in a
+way that makes the claim true; a different section can still restate a sentence in
+words. Label noise is the main reason synthetic scores overstate real accuracy.
+
+**The gold set never enters training, enforced in code:** every chunk that is a passage
+or evidence chunk in `data/eval/gold_labels.jsonl` or `data/labels/labels.jsonl`, and
+every chunk retrieved for any candidate in `data/candidates/` (labeled or not), is
+removed before seeds and partners are drawn; any example whose claim equals a gold claim
+(whitespace-normalized, case-insensitive) is dropped. The counts go to `manifest.json`
+and into the model card; `build-training-data` warns loudly when it finds nothing to
+exclude (e.g. the gold files weren't pushed before running on Colab).
+
+**Splits are by company** (`config/training.yaml`): each company's examples go to one
+split, and `other_company` partners come from the same split, so no evidence text
+crosses splits either. Default: train JPM, BRK-B, AAPL, MSFT; dev AMZN (model selection
+only); test WMT, XOM, JNJ. *Why this split:* JPM and BRK-B aren't in the labeled set and
+have large filings; adding two labeled companies gives the model filing styles it will
+meet, while WMT, XOM and JNJ are never seen during training or model selection, so
+their rows in `eval-verifiers`' by-company table measure unseen companies. All gold
+passages are excluded from training regardless of the split.
+*Alternative:* train only on JPM and BRK-B, so every gold company is unseen; it's one
+line in the config, at the cost of a less varied training set.
+
+**Training** (`training/train.py`, `scripts/train_verifier.py`): Hugging Face `Trainer`
+on `microsoft/deberta-v3-small` (a strong small encoder for NLI-style pair tasks;
+it fits a T4 at batch 16 and 512 tokens). Input is the (evidence chunk, claim) pair,
+truncating only the evidence (`encode_pair`, the same function shape `FineTunedVerifier`
+uses at inference). 3 epochs, learning rate 3e-5, warmup 10%, weight decay 0.01, fp16
+on CUDA only, best epoch by dev macro-F1. Seeds: `transformers.set_seed(seed)` before
+the model is built (Python, numpy, torch), plus `seed` and `data_seed` in the Trainer;
+`--full-determinism` adds PyTorch's deterministic algorithms. Outputs: the model and
+tokenizer, `metrics.json` (dev and synthetic-test metrics, train loss, every setting and
+library version), `training_manifest.json`, and `README.md`, a model card that states
+the data is synthetic, the exclusion counts, the company splits, the input format, the
+metrics and the limitations. `models/` and `data/training/` are gitignored: weights are
+hundreds of MB, and the data is rebuilt deterministically from the committed chunks.
+*Why no `datasets` package:* a list of tokenized dicts plus `DataCollatorWithPadding`
+is all the Trainer needs, and it's one heavy dependency fewer.
+
+**`FineTunedVerifier`** (`verify/finetuned.py`): loads from a local directory only
+(`local_files_only=True`) and refuses one without `config.json` or whose `id2label`
+doesn't name the three labels. It scores each chunk and aggregates: **supported** if
+any chunk's most likely class is supported (one passage stating the claim is enough,
+as in the guide), else **contradicted** if any chunk's is contradicted, else
+**unsupported**; the chunk the verdict rests on is cited, and `score` is the highest
+P(supported). It plugs into `eval-verifiers --verifier finetuned --finetuned-path DIR`.
+
+**Colab** (`notebooks/finetune_verifier_colab.ipynb`): clone, install `.[train]`,
+`build-training-data`, a 64-example smoke run, the real run, print `metrics.json` and
+the model card, optionally `eval-verifiers` on the gold set on the T4, and download
+the model as a zip. Latency must be re-measured on the Mac for the README.
+
+**Tests** run the real data builder on synthetic multi-company chunks (gold chunk,
+gold claim and candidate chunk all excluded; splits by company; partners in the same
+split; byte-identical output on a re-run), each perturbation rule, and the training
+script and `FineTunedVerifier` over stand-in `transformers` (seeds, Trainer settings,
+id2label, pair order, metrics file, model card, aggregation).
