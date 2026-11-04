@@ -11,16 +11,17 @@ Still **supported** (the meaning is unchanged):
   precision is supported, PLAN.md's rounding rule).
 
 **Contradicted** (the evidence shows the new claim is false):
-- `numeric`: one number (not a year) changed by 10-50%, formatted like the original,
-  and only if the new number does not appear anywhere in the evidence;
+- `numeric`: one number (not a year, not a reference like "Note 14" or "ASU 2023-10")
+  changed by 10-50%, formatted like the original, and only if the new number does not
+  appear anywhere in the evidence;
 - `scale`: million <-> billion, thousand -> million (a scale error is contradicted);
 - `negation`: increased <-> decreased, higher <-> lower, ... or "was" -> "was not";
 - `year_swap`: a year replaced by *another year that appears in the evidence*, so the
   value is attached to the wrong period. (A year the evidence never mentions would make
   the claim unsupported, not contradicted, so such swaps are not made.);
 - `entity_swap`: a table row label replaced by another row label of the same table
-  whose values differ, or a capitalized name replaced by another name from the
-  evidence.
+  whose values differ, or a two-to-three-word capitalized name (not at the start of a
+  sentence, no common words) replaced by another such name from the evidence.
 
 The rules are heuristics, so some examples will be mislabeled; docs/DESIGN.md lists
 the known failure modes. They never see the hand-labeled gold set.
@@ -32,9 +33,16 @@ import re
 from groundcheck.verify.spans import NUMBER_RE, numbers
 
 YEAR_RE = re.compile(r"\b(19[5-9]\d|20[0-4]\d)\b")
+# Numbers that name something rather than measure it: "Note 14", "ASU 2023-10", "Item 7".
+REFERENCE_RE = re.compile(
+    r"\b(?:Notes?|ASU|Items?|Rules?|Sections?|Form|Exhibits?|Topic|Parts?|pages?)\s+"
+    r"[\dA-Z][\w.-]*",
+)
 SCALE_RE = re.compile(r"\b(thousand|million|billion)\b", re.IGNORECASE)
 RESCALE_RE = re.compile(r"\$(\d{1,3}(?:,\d{3})+|\d{4,})(?:\.\d+)?\s+million\b")
-NAME_RE = re.compile(r"\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2}\b")
+# Prose names for entity swaps: two or three capitalized words ("Intelligent Cloud",
+# "Greater China"); single capitalized words are too often sentence starts or fragments.
+NAME_RE = re.compile(r"\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2}\b")
 
 SYNONYMS = {
     "increased": "rose",
@@ -61,7 +69,8 @@ ANTONYMS = {
     "above": "below",
     "below": "above",
 }
-NEGATABLE_RE = re.compile(r"\b(was|were|is|are|did|has|have)\b(?! not)")
+# Auxiliaries only: "has"/"have" are often main verbs ("could have an adverse effect").
+NEGATABLE_RE = re.compile(r"\b(was|were|is|are|did)\b(?! not)")
 SCALE_SWAP = {"million": "billion", "billion": "million", "thousand": "million"}
 COMMON_CAPITALS = frozenset(
     {
@@ -109,8 +118,14 @@ def format_like(value: float, original: str) -> str:
 
 
 def numeric(claim: str, evidence: str, rng: random.Random) -> str | None:
+    references = [r.span() for r in REFERENCE_RE.finditer(claim)]
     candidates = [
-        m for m in NUMBER_RE.finditer(claim) if not YEAR_RE.fullmatch(m.group(0).replace(",", ""))
+        m
+        for m in NUMBER_RE.finditer(claim)
+        if not YEAR_RE.fullmatch(m.group(0).replace(",", ""))
+        and not any(start <= m.start() < end for start, end in references)
+        and claim[max(m.start() - 1, 0) : m.start()] != "-"
+        and claim[m.end() : m.end() + 1] != "-"
     ]
     candidates = [m for m in candidates if float(m.group(0).replace(",", "")) > 0]
     if not candidates:
@@ -138,8 +153,8 @@ def negation(claim: str, evidence: str, rng: random.Random) -> str | None:
     flipped = _replace_word(claim, ANTONYMS, rng)
     if flipped is not None:
         return flipped
-    if re.search(r"\bnot\b|n't\b", claim):
-        return None
+    if re.search(r"\b(?:not|no|never|none|nor)\b|n't\b", claim, flags=re.IGNORECASE):
+        return None  # inserting "not" here would make a double negative
     match = NEGATABLE_RE.search(claim)
     if not match:
         return None
@@ -180,13 +195,24 @@ def entity_swap(claim: str, evidence: str, rng: random.Random) -> str | None:
         if others:
             return claim.replace(old, rng.choice(sorted(others)), 1)
         return None
-    names = [n for n in NAME_RE.findall(claim) if n.split()[0] not in COMMON_CAPITALS]
-    pool = sorted(
-        {n for n in NAME_RE.findall(evidence) if n.split()[0] not in COMMON_CAPITALS} - set(names)
-    )
+    names = prose_names(claim)
+    pool = sorted(set(prose_names(evidence)) - set(names))
     if not names or not pool:
         return None
     return claim.replace(rng.choice(names), rng.choice(pool), 1)
+
+
+def prose_names(text: str) -> list[str]:
+    """Multiword capitalized names, skipping sentence starts and common words."""
+    names = []
+    for match in NAME_RE.finditer(text):
+        before = text[: match.start()].rstrip()
+        if not before or before[-1] in ".!?:;\n|":
+            continue  # a capital at the start of a sentence or cell proves nothing
+        if any(word in COMMON_CAPITALS for word in match.group(0).split()):
+            continue
+        names.append(match.group(0))
+    return names
 
 
 SUPPORTED_REWRITES = {"synonym": synonym, "rescale": rescale}

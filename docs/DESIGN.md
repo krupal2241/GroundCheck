@@ -983,7 +983,12 @@ part follows the brief directly.
 **Seeds: supported pairs from the chunks themselves** (`training/data.py`). A prose
 sentence of 8–45 words is supported by its own chunk; one numeric cell per table row
 becomes a templated claim, "<row label> was <value> for <column header>.", supported by
-its table chunk. Up to 1,500 seeds per company are sampled with a fixed seed.
+its table chunk. The header is the first row with a year in a value column (multi-row
+headers put "Year ended December 31," above the years); "Page" columns (tables of
+contents) and sentences that start with page furniture ("K-106 (31) ...") give no seeds.
+Up to 1,500 seeds per company are sampled with a fixed seed, at most 70% of them with a
+number in the claim and the rest any sentence (`numeric_seed_share`), since gold claims
+are mostly about numbers.
 *Why not the LLM-generated candidate claims:* they are exactly the claims that get
 hand-labeled, so they are the evaluation set's distribution and may not be used.
 
@@ -1002,12 +1007,22 @@ period is contradicted but a period the chunks don't cover is unsupported; a tab
 label is only swapped for a row whose values differ from the claim's numbers;
 `rescale` rounds to the claim's one decimal, which the PLAN.md rounding rule calls
 supported, while `scale` (million <-> billion without rescaling) is the contradicted
-units/scale case. The unsupported partner is the most word-similar of 60 sampled
+units/scale case. Reference numbers ("Note 14", "ASU 2023-10", "Item 7") are never
+changed by `numeric`, since a different note number is not a factual error. `negation`
+only inserts "not" after an auxiliary (was, were, is, are, did, not has/have, which are
+often main verbs) and never into a claim that already has a negative (no double
+negatives). Prose `entity_swap` only swaps two- or three-word capitalized names that
+don't start a sentence and contain no common word ("Greater China" -> "Latin
+America"). These rules were tightened after a run on the real chunks showed the noise
+each one prevents. The unsupported partner is the most word-similar of 60 sampled
 chunks that contains none of the claim's numbers and not the claim itself: on topic
 (hard) but unable to back it. *Known noise:* negation by inserting "not" can produce
 an odd sentence; a name swapped in prose may also be mentioned in the evidence in a
 way that makes the claim true; a different section can still restate a sentence in
-words. Label noise is the main reason synthetic scores overstate real accuracy.
+words; inserting "not" before a negative adjective ("is not unable") flips the
+meaning awkwardly. Label noise is the main reason synthetic scores overstate real
+accuracy. *Balance:* contradicted is the smallest class (~27% of examples on the real
+chunks; some seeds fit no rule), so dev macro-F1, not accuracy, picks the best epoch.
 
 **The gold set never enters training, enforced in code:** every chunk that is a passage
 or evidence chunk in `data/eval/gold_labels.jsonl` or `data/labels/labels.jsonl`, and

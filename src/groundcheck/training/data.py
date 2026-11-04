@@ -50,7 +50,12 @@ from groundcheck.chunking.base import Chunk, read_chunks
 from groundcheck.config import REPO_ROOT, ConfigError
 from groundcheck.labeling.schema import Label
 from groundcheck.retrieval.evaluate import normalize_for_match
-from groundcheck.training.perturb import CONTRADICTING_REWRITES, SUPPORTED_REWRITES, table_rows
+from groundcheck.training.perturb import (
+    CONTRADICTING_REWRITES,
+    SUPPORTED_REWRITES,
+    YEAR_RE,
+    table_rows,
+)
 from groundcheck.verify.spans import SENTENCE_SPLIT_RE, content_words, numbers
 
 DEFAULT_TRAINING_CONFIG = REPO_ROOT / "config" / "training.yaml"
@@ -71,6 +76,7 @@ class TrainingConfig(BaseModel):
     seed: int = 13
     splits: dict[Literal["train", "dev", "test"], list[str]]
     max_seeds_per_company: int = Field(default=1500, ge=1)
+    numeric_seed_share: float = Field(default=0.7, ge=0, le=1)
     supported_rewrite_rate: float = Field(default=0.5, ge=0, le=1)
     other_company_rate: float = Field(default=0.5, ge=0, le=1)
     partner_candidates: int = Field(default=60, ge=1)
@@ -183,21 +189,35 @@ def sentence_seeds(chunk: Chunk, min_words: int, max_words: int) -> list[Seed]:
                 continue
             if not sentence[0].isupper() or sentence.lower().startswith(("item ", "see ")):
                 continue
+            if any(ch.isdigit() for ch in words[0]):
+                continue  # page furniture glued to a sentence: "K-106 (31) Business ..."
             seeds.append(Seed(chunk=chunk, claim=sentence, kind="sentence"))
     return seeds
+
+
+def header_index(rows: list[list[str]]) -> int:
+    """The header row: the first row with a year in a value column (multi-row headers
+    put "Year ended December 31," above the years), else the first row."""
+    for index, row in enumerate(rows[:4]):
+        if any(YEAR_RE.search(cell) for cell in row[1:]):
+            return index
+    return 0
 
 
 def table_seeds(chunk: Chunk) -> list[Seed]:
     rows = table_rows(chunk.text)
     if len(rows) < 2:
         return []
-    header = rows[0]
+    start = header_index(rows)
+    header = rows[start]
     seeds = []
-    for row in rows[1:]:
+    for row in rows[start + 1 :]:
         label = row[0]
         if not label or not re.search(r"[A-Za-z]{3}", label) or len(label) > 80:
             continue
         for column, value in zip(header[1:], row[1:], strict=False):
+            if column.lower().startswith("page"):
+                continue  # a table of contents: the "values" are page numbers
             if column and value and re.search(r"\d", value):
                 claim = f"{label} was {value} for {column}."
                 seeds.append(Seed(chunk=chunk, claim=normalize_for_match(claim), kind="table_cell"))
@@ -213,7 +233,15 @@ def company_seeds(chunks: list[Chunk], config: TrainingConfig, rng: random.Rando
         else:
             seeds += sentence_seeds(chunk, config.min_words, config.max_words)
     rng.shuffle(seeds)
-    return seeds[: config.max_seeds_per_company]
+    # Gold claims are mostly about numbers, so seeds with a number are preferred: up to
+    # `numeric_seed_share` of the quota, the rest filled with any remaining seeds.
+    limit = config.max_seeds_per_company
+    with_numbers = [s for s in seeds if numbers(s.claim)]
+    chosen = with_numbers[: round(limit * config.numeric_seed_share)]
+    taken = {id(s) for s in chosen}
+    chosen += [s for s in seeds if id(s) not in taken][: limit - len(chosen)]
+    rng.shuffle(chosen)
+    return chosen
 
 
 # --- Examples -------------------------------------------------------------------------

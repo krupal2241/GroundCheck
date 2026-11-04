@@ -78,10 +78,11 @@ def test_entity_swap_uses_another_row_with_different_values():
     claim = "Operating income was $3,210 for 2025."
     new = perturb.entity_swap(claim, TABLE, rng())
     assert new in {"Total net sales was $3,210 for 2025.", "Net income was $3,210 for 2025."}
-    prose_claim = "Services revenue decreased in the Americas segment."
-    evidence = PROSE + " Revenue in Europe and Greater China grew."
-    swapped = perturb.entity_swap(prose_claim, evidence, rng())
-    assert swapped != prose_claim and ("Europe" in swapped or "Greater China" in swapped)
+    prose_claim = "Sales grew in Greater China during the year."
+    evidence = "Sales grew in Greater China and fell in Latin America."
+    assert perturb.entity_swap(prose_claim, evidence, rng()) == (
+        "Sales grew in Latin America during the year."
+    )
 
 
 # --- Seeds ------------------------------------------------------------------------------
@@ -360,3 +361,36 @@ def test_colab_notebook_builds_data_trains_and_downloads():
     assert "scripts/train_verifier.py" in source and "--seed" in source
     assert '".[train]"' in source and "files.download" in source
     assert all(cell.get("outputs", []) == [] for cell in notebook["cells"])  # committed clean
+
+
+def test_rules_found_noisy_on_real_filings_are_tightened():
+    # "have" as a main verb is not negated ("could have not an adverse effect").
+    assert perturb.negation("It could have an adverse effect.", "", rng()) is None
+    # Single capitalized words and sentence starts are not swappable names.
+    evidence = "Except as noted, Opinions The Firm reports. Revenue in Greater China grew."
+    assert perturb.prose_names(evidence) == ["Greater China"]
+    assert perturb.entity_swap("Except for one, sales grew.", evidence, rng()) is None
+
+
+def test_multi_row_table_headers_use_the_year_row():
+    text = (
+        "[TABLE]\n | Year ended December 31,\n | 2025 | 2024\nNet revenue | 1,234 | 1,100\n[/TABLE]"
+    )
+    assert [s.claim for s in table_seeds(chunk("A", "8", "table", 0, text))] == [
+        "Net revenue was 1,234 for 2025."
+    ]
+
+
+def test_numeric_skips_references_and_negation_skips_negatives():
+    assert perturb.numeric("Refer to Note 14 for a further discussion.", "", rng()) is None
+    assert perturb.numeric("The Company adopted ASU 2023-10 in 2025.", "", rng()) is None
+    changed = perturb.numeric("See Note 4: sales were $120 million.", "", rng())
+    assert "Note 4" in changed and "$120 " not in changed
+    assert perturb.negation("There are virtually no barriers to entry.", "", rng()) is None
+
+
+def test_page_furniture_and_contents_tables_give_no_seeds():
+    prose = "K-106 (31) Business segment data We view our insurance segment as two activities."
+    assert sentence_seeds(chunk("A", "1", "prose", 0, prose), 8, 45) == []
+    toc = "[TABLE]\n | Page\nFirmwide Risk Management | 83\n[/TABLE]"
+    assert table_seeds(chunk("A", "1", "table", 0, toc)) == []
