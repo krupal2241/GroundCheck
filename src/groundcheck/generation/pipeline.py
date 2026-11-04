@@ -1,6 +1,6 @@
 """The candidate pipeline and its JSONL records.
 
-Per question: retrieve the top-k chunks from the company's FAISS index, ask the LLM to
+Per question: retrieve the top-k chunks with the configured retrieval variant, ask the LLM to
 answer from only those chunks, then ask it to split the answer into atomic claims
 (structured JSON, validated, with bounded retries).
 
@@ -48,10 +48,15 @@ DRY_RUN_CANDIDATES_DIR = REPO_ROOT / "data" / "cache" / "dry-run" / "candidates"
 class RetrievalInfo(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    embedder: str
+    embedder: str  # the dense model's name, or "none" for a BM25-only variant
     chunker: str
     top_k: int
     chunks_sha256: str  # of data/chunks/<TICKER>.jsonl when the index was searched
+    # The retrieval variant (config/retrieval.yaml) and its stages with the real model
+    # names, e.g. "dense=BAAI/bge-small-en-v1.5 bm25 rrf_k=60 pool=30". None only in
+    # records written before variants existed (dense bge-small).
+    variant: str | None = None
+    retriever: str | None = None
 
 
 class RetrievedChunk(BaseModel):

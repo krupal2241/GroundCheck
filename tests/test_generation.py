@@ -36,8 +36,8 @@ from groundcheck.generation.questions import (
     load_candidate_questions,
 )
 from groundcheck.llm.fake import FakeProvider
-from groundcheck.retrieval.embedder import HashingEmbedder
-from groundcheck.retrieval.index import CompanyIndex
+from groundcheck.retrieval.retriever import open_retriever
+from groundcheck.retrieval.variants import load_retrieval_config
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -142,15 +142,18 @@ def test_fake_responder_answers_and_splits():
 
 
 def make_generator(corpus, provider, **config):
-    index = CompanyIndex.load("EXCO", corpus["chunks"], corpus["index"])
-    embedder = HashingEmbedder()
-    info = RetrievalInfo(embedder=embedder.name, chunker="c", top_k=3, chunks_sha256="s")
-    return Generator(
-        provider,
-        lambda t, q, k: index.search(embedder, q, k),
-        lambda t: info,
-        LLMConfig(top_k=3, **config),
+    retrieval = load_retrieval_config(corpus["retrieval_config"])
+    name, spec = retrieval.get()
+    retriever = open_retriever(name, spec, retrieval, ["EXCO"], corpus["chunks"], corpus["index"])
+    info = RetrievalInfo(
+        embedder="hashing-256",
+        chunker="c",
+        top_k=3,
+        chunks_sha256="s",
+        variant=name,
+        retriever=retriever.description,
     )
+    return Generator(provider, retriever.search, lambda t: info, LLMConfig(top_k=3, **config))
 
 
 QUESTION = GenerationQuestion(
@@ -270,7 +273,10 @@ def test_dry_run_end_to_end(tiny_corpus, capsys):
     records = read_candidates(candidates_path("EXCO", tiny_corpus["out"]))
     assert [r.question_id for r in records] == ["EXCO-01", "EXCO-G01", "EXCO-G02"]
     assert all(r.claims and r.retrieval.embedder == "hashing-256" for r in records)
+    assert all(r.retrieval.variant == "dense" for r in records)  # the config's default
+    assert all(r.retrieval.retriever == "dense=hashing-256" for r in records)
     assert all(len(r.retrieved) == 3 for r in records)  # top_k from the llm config
+    assert "retriever dense (dense=hashing-256)" in out
     # Resume: nothing left to do.
     assert runner.main(tiny_corpus["generate_args"]("--dry-run")) == 0
     assert "Wrote 0 candidate(s)" in capsys.readouterr().out
@@ -283,6 +289,33 @@ def test_script_flags(tiny_corpus, capsys):
     assert len(records) == 1 and len(records[0].retrieved) == 2
     assert runner.main(tiny_corpus["generate_args"]("--dry-run", "--company", "OTHR")) == 2
     assert "not a labeled company" in capsys.readouterr().err
+
+
+def test_generation_uses_the_chosen_variant(tiny_corpus, capsys):
+    # hybrid-rerank needs its own index (header texts); without it, fail before any call.
+    args = tiny_corpus["generate_args"]("--dry-run", "--variant", "hybrid-rerank")
+    assert runner.main(args) == 2
+    assert "groundcheck index --variant hybrid-rerank" in capsys.readouterr().err
+    assert runner.main(tiny_corpus["generate_args"]("--dry-run", "--variant", "bm25")) == 0
+    records = read_candidates(candidates_path("EXCO", tiny_corpus["out"]))
+    assert {r.retrieval.variant for r in records} == {"bm25"}
+    assert {(r.retrieval.embedder, r.retrieval.retriever) for r in records} == {("none", "bm25")}
+    retrieved = records[1].retrieved  # EXCO-G01: total net sales
+    assert retrieved[0].chunk_id.startswith("EXCO-7-") and retrieved[0].rank == 1
+    # The stored chunk text comes back unchanged, whatever the variant did.
+    from conftest import TINY_CHUNKS
+
+    assert all(r.text == TINY_CHUNKS[r.chunk_id][2] for rec in records for r in rec.retrieved)
+
+
+def test_resume_refuses_to_mix_retrieval_variants(tiny_corpus, capsys):
+    assert runner.main(tiny_corpus["generate_args"]("--dry-run", "--limit", "1")) == 0
+    capsys.readouterr()
+    assert runner.main(tiny_corpus["generate_args"]("--dry-run", "--variant", "bm25")) == 2
+    err = capsys.readouterr().err
+    assert "from retrieval variant 'dense', not 'bm25'" in err and "--out-dir" in err
+    # The same variant resumes normally.
+    assert runner.main(tiny_corpus["generate_args"]("--dry-run")) == 0
 
 
 def test_dry_run_default_output_is_outside_committed_data(tiny_corpus, monkeypatch):
@@ -298,7 +331,7 @@ def test_missing_index_fails_before_any_model_call(tiny_corpus, capsys):
     args = tiny_corpus["generate_args"]("--dry-run")
     args[args.index("--index-dir") + 1] = str(tiny_corpus["root"] / "no-index")
     assert runner.main(args) == 2
-    assert "run `groundcheck index`" in capsys.readouterr().err
+    assert "run `groundcheck index --variant dense`" in capsys.readouterr().err
 
 
 def test_no_questions_yet(tiny_corpus, capsys):

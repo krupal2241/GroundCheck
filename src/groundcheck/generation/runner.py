@@ -25,6 +25,9 @@ from groundcheck.generation.pipeline import (
     DRY_RUN_CANDIDATES_DIR,
     Generator,
     RetrievalInfo,
+    candidate_id,
+    candidates_path,
+    read_candidates,
     run,
 )
 from groundcheck.generation.prompts import fake_responder
@@ -35,9 +38,16 @@ from groundcheck.generation.questions import (
 )
 from groundcheck.llm.base import LLMError
 from groundcheck.llm.factory import make_provider
-from groundcheck.retrieval.embedder import make_embedder
+from groundcheck.retrieval.embedder import EMBEDDERS
 from groundcheck.retrieval.evaluate import DEFAULT_QUESTIONS_PATH
-from groundcheck.retrieval.index import DEFAULT_INDEX_DIR, CompanyIndex, file_sha256
+from groundcheck.retrieval.index import DEFAULT_INDEX_DIR, file_sha256
+from groundcheck.retrieval.rerank import RERANKERS
+from groundcheck.retrieval.retriever import open_retriever
+from groundcheck.retrieval.variants import (
+    DEFAULT_RETRIEVAL_CONFIG_PATH,
+    fiscal_years,
+    load_retrieval_config,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -69,8 +79,28 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--chunks-dir", type=Path, default=DEFAULT_CHUNKS_DIR)
     parser.add_argument("--index-dir", type=Path, default=DEFAULT_INDEX_DIR)
     parser.add_argument("--out-dir", type=Path, default=None, help="default: data/candidates")
-    parser.add_argument("--embedder", choices=["bge-small", "hashing"], default="bge-small")
-    parser.add_argument("--device", default=None, help="embedder device: cpu, mps or cuda")
+    parser.add_argument(
+        "--retrieval-config",
+        type=Path,
+        default=DEFAULT_RETRIEVAL_CONFIG_PATH,
+        help="retrieval variants (default: config/retrieval.yaml)",
+    )
+    parser.add_argument(
+        "--variant", default=None, help="retrieval variant (default: `default` in the config)"
+    )
+    parser.add_argument(
+        "--embedder",
+        choices=list(EMBEDDERS),
+        default=None,
+        help="override the variant's embedder (hashing: offline fake)",
+    )
+    parser.add_argument(
+        "--reranker",
+        choices=list(RERANKERS),
+        default=None,
+        help="override the variant's reranker (overlap: offline fake)",
+    )
+    parser.add_argument("--device", default=None, help="model device: cpu, mps or cuda")
     parser.add_argument("-v", "--verbose", action="store_true")
     return parser
 
@@ -110,28 +140,40 @@ def _run(args: argparse.Namespace) -> int:
 
     # Load every index first, so a missing one fails before any model call.
     tickers = sorted({q.ticker for q in questions})
-    indexes = {t: CompanyIndex.load(t, args.chunks_dir, args.index_dir) for t in tickers}
-    embedder = make_embedder(args.embedder, args.device)
+    retrieval = load_retrieval_config(args.retrieval_config)
+    variant, spec = retrieval.get(args.variant)
+    spec = spec.with_overrides(args.embedder, args.reranker)
+    retriever = open_retriever(
+        variant,
+        spec,
+        retrieval,
+        tickers,
+        args.chunks_dir,
+        args.index_dir,
+        fiscal_years(companies),
+        device=args.device,
+    )
+    _refuse_mixed_variants(questions, provider, out_dir, variant)
+    embedder_name = retriever.embedder.name if retriever.embedder is not None else "none"
     infos = {
         t: RetrievalInfo(
-            embedder=embedder.name,
-            chunker=indexes[t].chunks[0].chunker,
+            embedder=embedder_name,
+            chunker=retriever.chunker(t),
             top_k=llm_config.top_k,
             chunks_sha256=file_sha256(chunks_path(t, args.chunks_dir)),
+            variant=variant,
+            retriever=retriever.description,
         )
         for t in tickers
     }
 
-    def retrieve(ticker: str, question: str, k: int):
-        return indexes[ticker].search(embedder, question, k)
-
     identity = provider.identity()
     print(
         f"Model: {identity.provider} {identity.model} (digest {identity.model_digest[:19]}, "
-        f"{identity.runtime} {identity.runtime_version}); embedder {embedder.name}, "
-        f"top_k {llm_config.top_k}; output {out_dir}"
+        f"{identity.runtime} {identity.runtime_version}); retriever {variant} "
+        f"({retriever.description}), top_k {llm_config.top_k}; output {out_dir}"
     )
-    generator = Generator(provider, retrieve, infos.__getitem__, llm_config)
+    generator = Generator(provider, retriever.search, infos.__getitem__, llm_config)
     summary = run(
         generator,
         questions,
@@ -148,6 +190,22 @@ def _run(args: argparse.Namespace) -> int:
     if hits is not None:
         print(f"LLM cache: {hits} hit(s), {provider.misses} miss(es)")
     return 1 if summary.failed else 0
+
+
+def _refuse_mixed_variants(questions, provider, out_dir: Path, variant: str) -> None:
+    """Resuming skips questions that already have a record for this model. If those
+    records came from another retrieval variant, the output would silently mix two
+    retrievers, so refuse and say how to keep them apart."""
+    wanted = {candidate_id(q.id, provider) for q in questions}
+    for ticker in sorted({q.ticker for q in questions}):
+        for record in read_candidates(candidates_path(ticker, out_dir)):
+            other = record.retrieval.variant
+            if record.candidate_id in wanted and other is not None and other != variant:
+                raise ConfigError(
+                    f"{candidates_path(ticker, out_dir)} already has {record.candidate_id} "
+                    f"from retrieval variant {other!r}, not {variant!r}; use --variant "
+                    f"{other} to resume it, or --out-dir to start a separate set"
+                )
 
 
 def main(argv: list[str] | None = None) -> int:
