@@ -12,6 +12,9 @@ Rules (see docs/labeling_guide.md):
 - `edge_case` is one tag from the labeling guide's list, or None.
 - `confirmed` is True only once a human has confirmed the label. Export keeps only
   confirmed labels (PLAN.md: no fabricated gold labels).
+- `invalid` marks a claim that should never have been proposed (a fragment, a
+  duplicate, a claim with no checkable content): it has no label, no evidence and no
+  edge case, and it is never exported. `label-stats` counts these separately.
 
 The schema checks what it can on its own. Pass the candidate's chunks as validation
 context (`LabelRecord.model_validate(data, context={"chunks": {chunk_id: text}})`)
@@ -91,7 +94,8 @@ class LabelRecord(BaseModel):
     ticker: str
     qtype: str
     claim: str = Field(min_length=1)
-    label: Label
+    label: Label | None = None  # None only for an invalid claim
+    invalid: bool = False  # the `x` key: a malformed claim, not labeled, never exported
     evidence: list[EvidenceSpan] = Field(default_factory=list)
     edge_case: EdgeCase | None = None
     confirmed: bool = False
@@ -105,6 +109,12 @@ class LabelRecord(BaseModel):
 
     @model_validator(mode="after")
     def _label_rules(self) -> "LabelRecord":
+        if self.invalid:
+            if self.label is not None or self.evidence or self.edge_case is not None:
+                raise ValueError("an invalid claim has no label, evidence or edge case")
+            return self
+        if self.label is None:
+            raise ValueError("a label is required unless the claim is marked invalid")
         if self.label in ("supported", "contradicted") and not self.evidence:
             raise ValueError(f"a {self.label} label needs at least one evidence span")
         if self.label == "unsupported" and self.evidence:

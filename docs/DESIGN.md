@@ -1034,14 +1034,10 @@ exclude (e.g. the gold files weren't pushed before running on Colab).
 
 **Splits are by company** (`config/training.yaml`): each company's examples go to one
 split, and `other_company` partners come from the same split, so no evidence text
-crosses splits either. Default: train JPM, BRK-B, AAPL, MSFT; dev AMZN (model selection
-only); test WMT, XOM, JNJ. *Why this split:* JPM and BRK-B aren't in the labeled set and
-have large filings; adding two labeled companies gives the model filing styles it will
-meet, while WMT, XOM and JNJ are never seen during training or model selection, so
-their rows in `eval-verifiers`' by-company table measure unseen companies. All gold
+crosses splits either. *Original default (Part 3):* train JPM, BRK-B, AAPL, MSFT; dev
+AMZN; test WMT, XOM, JNJ. **Changed in Overnight Part 1** to train JPM, dev BRK-B, test
+the six labeled companies: see "Claim-splitting quality" below for why. All gold
 passages are excluded from training regardless of the split.
-*Alternative:* train only on JPM and BRK-B, so every gold company is unseen; it's one
-line in the config, at the cost of a less varied training set.
 
 **Training** (`training/train.py`, `scripts/train_verifier.py`): Hugging Face `Trainer`
 on `microsoft/deberta-v3-small` (a strong small encoder for NLI-style pair tasks;
@@ -1127,3 +1123,90 @@ would reload the models unless cached by hand, and Gradio's HTML output is enoug
 check the highlighting and escaping, and build the app and the `demo` command over a
 stand-in `gradio` module (components, the click handler, and that `launch` gets
 127.0.0.1, port 7860, `share=False`).
+
+## Claim-splitting quality (`generation/claims.py`), Overnight Part 1
+
+**The problem, seen on the Mac:** llama3.2:3b split "According to passage [1], the
+Company repurchased 402 million shares of its common stock for $89.3 billion in fiscal
+2025." into eight claims, five of them fragments ("The Company", "its common stock"
+twice, "402 million", "billion"). A clean Greater China answer gave three good
+full-sentence claims, so the model *can* do it; the v1 prompt just didn't show it how.
+A fragment in the labeled set is worse than a missing claim: it can't be judged, and
+whichever label it gets is noise.
+
+**Prompt v2** (`prompts.claims_prompt`, `PROMPT_VERSION = "v2"`): seven numbered rules,
+then three worked examples, then the real answer. Rules: one complete, self-contained
+sentence per claim with a named subject and a verb; "the Company", "we", "it" and "its"
+replaced by the company's short name ("Apple", from `config/companies.yaml` with the
+legal suffix stripped by `short_company_name`); numbers, units, scale and period copied
+exactly; no fragments, duplicates or added facts; citations such as "According to
+passage [1]" left out; an empty list for an abstention. Examples: (1) the failing
+repurchase answer with its corrected two-claim output, (2) the clean Greater China case
+(three claims, two periods and a percentage change), (3) a Walmart percentage-change
+answer with "its" and a "passage [2]" citation to strip. *Why few-shot:* small models
+follow a demonstrated output format far more reliably than a described one, and the
+first example is literally the observed failure. *Why real filing numbers in the
+examples:* they are realistic, and the number validator below stops any of them leaking
+into a claim about another company (a copied "$89.3 billion" is not in that answer).
+
+**The validator** (deterministic, no model): a claim is rejected if it has fewer than 5
+words; has no verb-like word (a list of verbs and auxiliaries common in 10-K answers,
+or any alphabetic word of 5+ letters ending in "-ed"; "-s" and "-ing" endings are not
+counted, since "shares" and "operating income" are not verbs); duplicates an earlier
+kept claim (same words after lower-casing and stripping punctuation) or near-duplicates
+it (identical set of numbers and Jaccard similarity of content words >= 0.8; different
+numbers mean different facts, so "sales were $64,377 million in 2025" and "...$66,952
+million in 2024" are both kept); contains "passage [n]" or a bare "[n]"; or contains a
+number that is not in the answer (commas and trailing zeros normalized, so "$12,345"
+matches "12345"). A year counts as a number, so a claim that adds "fiscal 2024" to an
+answer that only says "the previous year" is rejected: that's an added fact.
+
+**Retries:** if any claim is rejected (or the list is empty for an answer that isn't
+the abstention sentence), the request is re-sent with a stricter message: the original
+prompt, then every rejected claim with its reasons, then the hard rules restated. At
+most 3 retries (`claim_max_retries` in `config/llm.yaml`); each attempt still has the
+JSON-level retries of `generate_structured`. The attempt with the most valid claims
+wins (ties go to the later, stricter attempt) and only its valid claims are kept. If a
+*retry* fails to produce JSON at all, the best earlier attempt is kept; only a first
+request that never parses fails the question (as before). *Why keep the best attempt
+rather than the last:* a stricter retry can over-correct and drop facts.
+
+**Statistics** go into every candidate as `claim_filter`: `proposed`, `rejected`, `kept`
+(for the chosen attempt), `retries`, `chosen_attempt`, per-attempt counts, every
+rejected claim with its reasons, and `validator_version`. The generation script prints
+"N claim(s) (P proposed, R rejected, T retries)" per question and a total. *Why record
+the rejected text:* it shows whether the validator is too strict (a good claim rejected
+for a missing verb) without re-running the model.
+
+**Cache:** the LLM cache key is the sha256 of the full system prompt, prompt and
+parameters, so the v2 prompt, the company name inside it, and each retry prompt all get
+new keys; a test pins that a v1-prompt request and a v2 request differ. Validator
+changes need no cache change: the cached reply is re-validated.
+
+**What the validator can't catch:** a full sentence with the wrong subject ("The
+Company repurchased ..." still passes: rule 2 is the prompt's job, not a hard rule,
+because rejecting every "the Company" would also reject legitimate quotations), a
+claim that paraphrases a fact wrongly without changing a number, and a verb outside the
+list in a short present-tense sentence. The labeling tool's `x` key covers the rest.
+
+**Invalid claims in labeling (`x`):** a claim the validator missed (a fragment, a
+duplicate) shouldn't be forced into supported/contradicted/unsupported. `x` saves a
+`LabelRecord` with `invalid: true`, no label, no evidence and no edge case (the schema
+enforces all three) plus an optional reason in `note`. `export-labels` never exports
+it; `label-stats` reports "Invalid claims: N" on its own line and leaves invalid
+records out of every label breakdown; `label-check` validates them like any record (the
+claim must exist with the same text; an invalid record with a label is an error). *Why
+a record and not a deletion:* the claim stays in the candidates file (append-only), so
+without a record `--only-unlabeled` would show it again forever.
+
+**Training split changed (`config/training.yaml`): train JPM, dev BRK-B, test the six
+labeled companies.** The earlier split trained on AAPL and MSFT and used AMZN for model
+selection. Gold chunks and claims were excluded, but the rest of those filings still
+taught the model each company's vocabulary, table layouts and segment names, which
+flatters the gold-set score in a way no exclusion rule can remove. Now no company with
+hand-labeled questions is seen in training or model selection. BRK-B is dev because it
+is a very different filing from JPM's (a conglomerate vs a bank), so the selected epoch
+isn't tuned to one industry. *Cost:* one training company. `build-training-data` prints
+a WARNING when the train split has fewer than 500 examples, and so does
+`scripts/train_verifier.py`. The 500 threshold is a judgment call: below it a
+DeBERTa-small fine-tune on three classes is mostly noise.

@@ -131,7 +131,8 @@ def _run(args: argparse.Namespace) -> int:
         f"{identity.runtime} {identity.runtime_version}); embedder {embedder.name}, "
         f"top_k {llm_config.top_k}; output {out_dir}"
     )
-    generator = Generator(provider, retrieve, infos.__getitem__, llm_config)
+    names = {c.ticker: c.name for c in companies.companies}
+    generator = Generator(provider, retrieve, infos.__getitem__, llm_config, names)
     summary = run(
         generator,
         questions,
@@ -144,6 +145,11 @@ def _run(args: argparse.Namespace) -> int:
         f"Wrote {summary.written} candidate(s) with {summary.claims} claim(s); "
         f"{summary.already_done} already done; {len(summary.failed)} failed."
     )
+    if summary.claims_rejected or summary.claim_retries:
+        print(
+            f"Claim validator: {summary.claims_rejected} claim(s) rejected, "
+            f"{summary.claim_retries} retry request(s) (details in each record's claim_filter)"
+        )
     hits = getattr(provider, "hits", None)
     if hits is not None:
         print(f"LLM cache: {hits} hit(s), {provider.misses} miss(es)")

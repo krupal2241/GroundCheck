@@ -15,5 +15,6 @@ max_tokens: 768
 context_window: 8192           # Ollama num_ctx; its 2,048 default would cut the passages
 timeout_s: 300
 json_max_attempts: 3             # structured output: first try + 2 retries
+claim_max_retries: 3             # claim splitting: re-asks after the validator rejects claims
 cache_dir: data/cache/llm        # gitignored; keyed by provider, model, digest, params
 top_k: 5                         # chunks retrieved per question

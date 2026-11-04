@@ -7,15 +7,25 @@
 # that was retrieved for a candidate (all gold passages included) and every gold claim
 # are excluded in code (see docs/DESIGN.md, Part 3).
 #
-# Default: JPM and BRK-B (not in the labeled set) plus AAPL and MSFT train; AMZN is the
-# dev set for model selection; WMT, XOM and JNJ are never seen in training at all, so
-# their rows in the eval-verifiers by-company table measure unseen companies.
+# Splits: train JPM, dev BRK-B, test = the six labeled companies.
+#
+# Why no labeled company trains: the hand-labeled test set is drawn from AAPL, MSFT,
+# AMZN, WMT, XOM and JNJ. Excluding their gold chunks and claims stops literal
+# leakage, but training on the rest of the same filing still teaches the model that
+# company's vocabulary, table layouts and segment names, which flatters the gold-set
+# score. JPM and BRK-B have no hand-labeled questions, so the fine-tuned verifier is
+# evaluated on companies it has never seen, and the synthetic test split (the six
+# labeled companies, gold chunks removed) measures the same thing on synthetic data.
+# BRK-B is dev (model selection only): a long, mixed filing (insurance, rail, energy)
+# unlike JPM's bank filing, so the chosen epoch is not tuned to one industry.
+# Cost: one training company gives a less varied training set; `build-training-data`
+# warns when the train split has fewer than 500 examples.
 
 seed: 13
 splits:
-  train: [JPM, BRK-B, AAPL, MSFT]
-  dev: [AMZN]
-  test: [WMT, XOM, JNJ]
+  train: [JPM]
+  dev: [BRK-B]
+  test: [AAPL, MSFT, AMZN, WMT, XOM, JNJ]
 
 max_seeds_per_company: 1500   # supported seeds sampled per company (each gives up to 3 examples)
 numeric_seed_share: 0.7       # up to this share of seeds contain a number (gold claims mostly do)

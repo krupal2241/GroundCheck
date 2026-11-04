@@ -3,8 +3,9 @@
 For each claim it shows the question, the answer, the retrieved chunks (with their
 IDs) and the claim, then asks for:
 
-1. the label: `s`upported, `c`ontradicted, `u`nsupported; `k` skips the claim,
-   `q` quits (Enter keeps an existing label);
+1. the label: `s`upported, `c`ontradicted, `u`nsupported; `x` marks the claim
+   invalid (a fragment or duplicate: saved without a label, never exported), `k` skips
+   the claim, `q` quits (Enter keeps an existing label);
 2. for supported/contradicted, one or more evidence spans pasted from the chunks
    above. Paste, then press Enter on an empty line. The span must occur in a
    retrieved chunk after whitespace normalization; if it occurs in several, you pick
@@ -38,6 +39,7 @@ class Quit(Exception):
 @dataclass
 class SessionResult:
     labeled: int = 0
+    invalid: int = 0
     kept: int = 0
     skipped: int = 0
     remaining: int = 0  # claims not shown because the user quit
@@ -105,7 +107,9 @@ class Labeler:
                 self.out(f"      {line}")
         self.out(f"CLAIM:    {item.claim.text}")
         existing = self.store.get(item.claim.claim_id)
-        if existing:
+        if existing and existing.invalid:
+            self.out("CURRENT LABEL: invalid claim (not labeled)")
+        elif existing:
             status = "confirmed" if existing.confirmed else "NOT confirmed"
             self.out(
                 f"CURRENT LABEL: {existing.label} ({status})"
@@ -164,24 +168,46 @@ class Labeler:
                 return answer
             self.out("  Type a number from the list, or Enter for none.")
 
+    def mark_invalid(self, item: ClaimItem) -> str:
+        reason = self.ask("Why is this claim invalid? (e.g. fragment, duplicate): ")
+        c = item.candidate
+        record = LabelRecord(
+            claim_id=item.claim.claim_id,
+            candidate_id=c.candidate_id,
+            question_id=c.question_id,
+            ticker=c.ticker,
+            qtype=c.qtype,
+            claim=item.claim.text,
+            invalid=True,
+            confirmed=True,
+            note=reason,
+            labeled_at=self.now(),
+        )
+        self.store.put(record)
+        self.out("  Saved: invalid claim (not labeled, never exported)")
+        return "invalid"
+
     def label_one(self, item: ClaimItem) -> str:
-        """Returns 'labeled', 'kept' or 'skipped'; raises Quit."""
+        """Returns 'labeled', 'invalid', 'kept' or 'skipped'; raises Quit."""
         existing = self.store.get(item.claim.claim_id)
         keep = "  Enter=keep" if existing else ""
         while True:
             key = self.ask(
-                f"Label? s=supported c=contradicted u=unsupported  k=skip q=quit{keep}: "
+                "Label? s=supported c=contradicted u=unsupported  x=invalid claim  "
+                f"k=skip q=quit{keep}: "
             )
             key = key.lower()
             if key == "q":
                 raise Quit
             if key == "k":
                 return "skipped"
+            if key == "x":
+                return self.mark_invalid(item)
             if not key and existing:
                 return "kept"
             if key in LABEL_KEYS:
                 break
-            self.out("  Type s, c, u, k or q.")
+            self.out("  Type s, c, u, x, k or q.")
         label = LABEL_KEYS[key]
         evidence = self.ask_evidence(item) if label != "unsupported" else []
         while True:
@@ -235,13 +261,16 @@ class Labeler:
                 break
             if outcome == "labeled":
                 result.labeled += 1
+            elif outcome == "invalid":
+                result.invalid += 1
             elif outcome == "kept":
                 result.kept += 1
             else:
                 result.skipped += 1
         self.out(RULE)
         self.out(
-            f"Session: {result.labeled} labeled, {result.kept} kept, {result.skipped} skipped"
+            f"Session: {result.labeled} labeled, {result.invalid} marked invalid, "
+            f"{result.kept} kept, {result.skipped} skipped"
             + (f", quit with {result.remaining} left" if result.quit else "")
             + f". Saved to {self.store.path}"
         )

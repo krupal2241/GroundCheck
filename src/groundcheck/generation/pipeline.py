@@ -15,6 +15,7 @@ import datetime as dt
 import json
 import logging
 import os
+import re
 import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
@@ -25,18 +26,17 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 
 from groundcheck import __version__
 from groundcheck.config import REPO_ROOT, LLMConfig
+from groundcheck.generation.claims import ClaimFilterStats, split_claims
 from groundcheck.generation.prompts import (
     ANSWER_SYSTEM,
     CLAIMS_SYSTEM,
     PROMPT_VERSION,
-    ClaimSplit,
     answer_prompt,
     claims_prompt,
     make_request,
 )
 from groundcheck.generation.questions import GenerationQuestion
 from groundcheck.llm.base import LLMError, LLMMetadata, LLMProvider
-from groundcheck.llm.structured import generate_structured
 from groundcheck.retrieval.index import Hit
 
 logger = logging.getLogger(__name__)
@@ -91,6 +91,26 @@ class CandidateRecord(BaseModel):
     prompt_version: str
     groundcheck_version: str
     generated_at: str  # UTC, ISO 8601
+    # Claim validator counts (proposed, rejected, kept, retries); None in v1 records.
+    claim_filter: ClaimFilterStats | None = None
+
+
+COMPANY_SUFFIX_RE = re.compile(
+    r",?\s+(inc\.?|incorporated|corporation|corp\.?|co\.?|company|ltd\.?|plc|& co\.?)$",
+    re.IGNORECASE,
+)
+
+
+def short_company_name(name: str) -> str:
+    """'Apple Inc.' -> 'Apple', 'Amazon.com, Inc.' -> 'Amazon', 'JPMorgan Chase & Co.'
+    -> 'JPMorgan Chase'. A name without a legal suffix is returned unchanged."""
+    short = name.strip()
+    while True:
+        stripped = COMPANY_SUFFIX_RE.sub("", short).strip()
+        if stripped == short or not stripped:
+            break
+        short = stripped
+    return short.removesuffix(".com") or name
 
 
 def model_tag(provider: LLMProvider) -> str:
@@ -147,6 +167,9 @@ class Generator:
     retrieve: Retriever  # (ticker, question, k) -> hits, best first
     retrieval_info: Callable[[str], RetrievalInfo]  # per ticker
     config: LLMConfig
+    # ticker -> company name (config/companies.yaml); the claim prompt uses the short
+    # form ("Apple") in place of "the Company" / "its". Missing: the ticker is used.
+    company_names: dict[str, str] = field(default_factory=dict)
 
     def _request(self, system: str, prompt: str):
         c = self.config
@@ -168,11 +191,13 @@ class Generator:
         passages = [(c.chunk_id, c.text) for c in retrieved]
         prompt = answer_prompt(question.ticker, question.question, passages)
         answer = self.provider.generate(self._request(ANSWER_SYSTEM, prompt))
-        split, claims_response = generate_structured(
+        company = short_company_name(self.company_names.get(question.ticker, question.ticker))
+        claims, claims_response, filter_stats = split_claims(
             self.provider,
-            self._request(CLAIMS_SYSTEM, claims_prompt(question.question, answer.text)),
-            ClaimSplit,
-            max_attempts=self.config.json_max_attempts,
+            self._request(CLAIMS_SYSTEM, claims_prompt(question.question, answer.text, company)),
+            answer.text,
+            max_json_attempts=self.config.json_max_attempts,
+            max_retries=self.config.claim_max_retries,
         )
         cid = candidate_id(question.id, self.provider)
         return CandidateRecord(
@@ -187,13 +212,14 @@ class Generator:
             answer=answer.text.strip(),
             claims=[
                 Claim(claim_id=f"{cid}#c{i:02d}", text=text)
-                for i, text in enumerate(split.claims, start=1)
+                for i, text in enumerate(claims, start=1)
             ],
             answer_model=answer.metadata,
             claims_model=claims_response.metadata,
             prompt_version=PROMPT_VERSION,
             groundcheck_version=__version__,
             generated_at=dt.datetime.now(dt.UTC).isoformat(timespec="seconds"),
+            claim_filter=filter_stats,
         )
 
 
@@ -203,6 +229,8 @@ class RunSummary:
     already_done: int = 0
     failed: list[tuple[str, str]] = field(default_factory=list)  # (question id, error)
     claims: int = 0
+    claims_rejected: int = 0  # by the claim validator, in the kept attempts
+    claim_retries: int = 0
 
 
 def batches(items: list, size: int) -> Iterator[list]:
@@ -251,5 +279,11 @@ def run(
             summary.written += 1
             summary.claims += len(record.claims)
             cached = " (cached)" if record.answer_model.cached else ""
-            echo(f"  {prefix}: {len(record.claims)} claim(s){cached}")
+            filtered = ""
+            f = record.claim_filter
+            if f and (f.rejected or f.retries):
+                summary.claims_rejected += f.rejected
+                summary.claim_retries += f.retries
+                filtered = f" ({f.proposed} proposed, {f.rejected} rejected, {f.retries} retries)"
+            echo(f"  {prefix}: {len(record.claims)} claim(s){filtered}{cached}")
     return summary

@@ -190,6 +190,8 @@ class LLMConfig(BaseModel):
     context_window: int = Field(default=8192, ge=512)  # Ollama num_ctx
     timeout_s: float = Field(default=300.0, gt=0)
     json_max_attempts: int = Field(default=3, ge=1, le=10)
+    # Claim splitting: re-asks when the validator rejects claims (generation/claims.py).
+    claim_max_retries: int = Field(default=3, ge=0, le=10)
     cache_dir: str = "data/cache/llm"  # relative to the repo root
     top_k: int = Field(default=5, ge=1, le=50)  # chunks retrieved per question
 

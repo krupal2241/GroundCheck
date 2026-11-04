@@ -18,14 +18,17 @@ def _counter_table(title: str, counter: Counter, order: list[str] | None = None)
     return lines
 
 
-def label_stats(records: list[LabelRecord], candidates: list[CandidateRecord]) -> str:
+def label_stats(all_records: list[LabelRecord], candidates: list[CandidateRecord]) -> str:
     total_claims = len(claim_items(candidates))
-    labeled = {r.claim_id for r in records}
+    seen = {r.claim_id for r in all_records}
+    invalid = [r for r in all_records if r.invalid]
+    records = [r for r in all_records if not r.invalid]
     confirmed = sum(r.confirmed for r in records)
-    unlabeled = sum(1 for i in claim_items(candidates) if i.claim.claim_id not in labeled)
+    unlabeled = sum(1 for i in claim_items(candidates) if i.claim.claim_id not in seen)
     lines = [
         f"Labels: {len(records)} ({confirmed} confirmed, {len(records) - confirmed} not "
         f"confirmed); claims in candidates: {total_claims}, unlabeled: {unlabeled}",
+        f"Invalid claims (marked with x; not labeled, never exported): {len(invalid)}",
     ]
     lines += _counter_table("By label", Counter(r.label for r in records), list(LABELS))
     by_label_confirmed = Counter(r.label for r in records if r.confirmed)
@@ -112,7 +115,9 @@ def export_record(record: LabelRecord, candidate: CandidateRecord) -> dict:
 def export_labels(records: list[LabelRecord], candidates: list[CandidateRecord], out: Path) -> int:
     """Write confirmed labels, sorted by claim ID, with their passages. Returns the count."""
     by_id = {c.candidate_id: c for c in candidates}
-    confirmed = sorted((r for r in records if r.confirmed), key=lambda r: r.claim_id)
+    confirmed = sorted(
+        (r for r in records if r.confirmed and not r.invalid), key=lambda r: r.claim_id
+    )
     lines = [
         json.dumps(export_record(r, by_id[r.candidate_id]), ensure_ascii=False) for r in confirmed
     ]

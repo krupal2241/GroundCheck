@@ -34,6 +34,13 @@ same text appears in two chunks, the tool asks which one you mean.
 **Confirm.** Answer `Y` only when you're sure. An unconfirmed label is kept as a draft
 and is left out of `export-labels`.
 
+**Invalid claims (`x`).** If the "claim" is not a checkable statement at all (a
+fragment like "402 million" or "its common stock", a duplicate of another claim of the
+same answer, or a sentence with no subject), press `x` instead of labeling it and give
+a short reason. It is saved as invalid: no label, no evidence, never exported, and
+counted separately by `label-stats`. Don't use `x` for a claim that is merely wrong or
+oddly worded; that still gets a label.
+
 **Edge-case tag.** Pick at most one tag, the one that decided the label. Use none for
 an ordinary claim.
 
@@ -202,7 +209,7 @@ measures whether the answer is grounded in what the model was given. No evidence
 ## Workflow
 
 ```bash
-groundcheck label --only-unlabeled          # label; q quits, run again to resume
+groundcheck label --only-unlabeled          # label; x = invalid claim; q quits, run again to resume
 groundcheck label --company AAPL            # one company; Enter keeps existing labels
 groundcheck label-stats                     # counts by label, company, qtype, edge case
 groundcheck label-check                     # validate every record (exit 1 on problems)

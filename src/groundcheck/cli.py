@@ -291,7 +291,11 @@ def cmd_label_check(args: argparse.Namespace) -> int:
     for problem in problems:
         print(f"ERROR: {problem}")
     status = "OK" if not problems else f"{len(problems)} problem(s)"
-    print(f"{len(records)} valid label record(s) in {args.labels}; {status}")
+    invalid = sum(r.invalid for r in records)
+    print(
+        f"{len(records)} valid label record(s) in {args.labels} ({invalid} marked invalid); "
+        f"{status}"
+    )
     return 1 if problems else 0
 
 
@@ -304,9 +308,11 @@ def cmd_export_labels(args: argparse.Namespace) -> int:
         print("Nothing exported: fix these first (`groundcheck label-check`).")
         return 1
     n = export_labels(records, candidates, args.out)
+    invalid = sum(r.invalid for r in records)
     print(
         f"Exported {n} confirmed label(s) to {args.out}; "
-        f"{len(records) - n} unconfirmed label(s) left out."
+        f"{len(records) - n - invalid} unconfirmed label(s) and {invalid} invalid claim(s) "
+        "left out."
     )
     return 0
 
@@ -421,6 +427,9 @@ def cmd_demo(args: argparse.Namespace) -> int:
     return 0
 
 
+MIN_TRAINING_EXAMPLES = 500
+
+
 def cmd_build_training_data(args: argparse.Namespace) -> int:
     config = load_training_config(args.training_config)
     gold_paths = [args.gold, args.labels]
@@ -446,6 +455,13 @@ def cmd_build_training_data(args: argparse.Namespace) -> int:
         detail = ", ".join(f"{k} {v}" for k, v in sorted(counts.items()))
         print(f"  {split:<5} {total:>6} example(s)  {detail}")
     print(f"By rule: {manifest['counts_by_rule']}")
+    n_train = sum(manifest["counts_by_split_and_label"].get("train", {}).values())
+    if n_train < MIN_TRAINING_EXAMPLES:
+        print(
+            f"WARNING: only {n_train} training example(s) (fewer than "
+            f"{MIN_TRAINING_EXAMPLES}). A verifier fine-tuned on this few will be weak; "
+            "add companies to the train split or raise max_seeds_per_company."
+        )
     print(f"Wrote {args.out_dir}/{{train,dev,test}}.jsonl and manifest.json")
     return 0
 

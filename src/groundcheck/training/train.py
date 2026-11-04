@@ -65,6 +65,9 @@ class EncodedDataset:
         return self.rows[index]
 
 
+MIN_TRAINING_EXAMPLES = 500  # below this, warn: see config/training.yaml
+
+
 def metrics_from_logits(logits: Any, label_ids: Any) -> dict[str, float]:
     """Accuracy, macro-F1 and per-class F1 / recall, from raw logits."""
     predicted = np.asarray(logits).argmax(axis=-1).tolist()
@@ -182,6 +185,11 @@ def train(args: argparse.Namespace) -> dict:
         )
     if args.limit_train:
         train_examples = train_examples[: args.limit_train]
+    if len(train_examples) < MIN_TRAINING_EXAMPLES and not args.limit_train:
+        print(
+            f"WARNING: only {len(train_examples)} training example(s) (fewer than "
+            f"{MIN_TRAINING_EXAMPLES}); the fine-tuned verifier will be weak."
+        )
     transformers.set_seed(args.seed)
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)

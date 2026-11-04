@@ -187,7 +187,7 @@ def test_bad_answers_are_asked_again(candidates, tmp_path):
     item = claim_items(candidates)[:1]
     lines = []
     script = Script(
-        "x",  # not a label key
+        "z",  # not a label key
         "s",
         "",  # no span yet: required
         "net sales were $99", "",  # not in any chunk
@@ -204,7 +204,7 @@ def test_bad_answers_are_asked_again(candidates, tmp_path):
     path = tmp_path / "labels.jsonl"
     assert labeler(LabelStore(path), script, lines).run(item).labeled == 1
     shown = "\n".join(lines)
-    assert "Type s, c, u, k or q." in shown
+    assert "Type s, c, u, x, k or q." in shown
     assert "At least one evidence span is required" in shown
     assert "Not found in any retrieved chunk" in shown
     assert "That span is already cited." in shown
@@ -326,3 +326,57 @@ def test_export_keeps_only_confirmed(labeled, tiny_corpus, capsys):
     assert main(args) == 1
     assert "Nothing exported" in capsys.readouterr().out
     assert out_path.read_text() == before
+
+
+# --- Invalid claims (the x key) ---------------------------------------------------------
+
+
+def test_invalid_claim_schema_rules():
+    invalid = record(label=None, evidence=[], invalid=True, note="fragment")
+    assert LabelRecord.model_validate(invalid).invalid
+    with pytest.raises(ValidationError, match="no label, evidence or edge case"):
+        LabelRecord.model_validate(record(invalid=True))
+    with pytest.raises(ValidationError, match="label is required"):
+        LabelRecord.model_validate(record(label=None, evidence=[]))
+
+
+def test_x_marks_invalid_and_it_is_counted_checked_and_never_exported(
+    candidates, tiny_corpus, capsys
+):
+    path = tiny_corpus["root"] / "labels.jsonl"
+    lines = []
+    script = Script(
+        "x", "fragment",  # claim 1: invalid
+        "s", "$12,345 million", "", "", "", "", "y",  # claim 2: supported, confirmed
+        "x", "",  # claim 3: invalid, no reason
+    )  # fmt: skip
+    result = labeler(LabelStore(path), script, lines).run(claim_items(candidates))
+    assert (result.labeled, result.invalid) == (1, 2)
+    saved = [json.loads(line) for line in path.read_text().splitlines()]
+    assert [(r["invalid"], r["label"]) for r in saved] == [
+        (True, None),
+        (False, "supported"),
+        (True, None),
+    ]
+    assert saved[0]["note"] == "fragment" and saved[0]["evidence"] == []
+    assert "2 marked invalid" in lines[-1]
+
+    text = label_stats(list(LabelStore(path).records.values()), candidates)
+    assert "Labels: 1 (1 confirmed, 0 not confirmed)" in text and "unlabeled: 0" in text
+    assert "Invalid claims (marked with x; not labeled, never exported): 2" in text
+    assert "  EXCO                     1" in text  # breakdowns count real labels only
+
+    assert main(cli_args(tiny_corpus, path, "label-check")) == 0
+    assert "3 valid label record(s)" in capsys.readouterr().out
+    out_path = tiny_corpus["root"] / "gold.jsonl"
+    assert main([*cli_args(tiny_corpus, path, "export-labels"), "--out", str(out_path)]) == 0
+    assert "Exported 1 confirmed label(s)" in capsys.readouterr().out
+    assert [json.loads(x)["label"] for x in out_path.read_text().splitlines()] == ["supported"]
+
+    # Showing an invalid claim again says so; label-check catches an invalid with a label.
+    labeler(LabelStore(path), Script("q"), lines).run(claim_items(candidates)[:1])
+    assert "CURRENT LABEL: invalid claim (not labeled)" in "\n".join(lines)
+    broken = saved[0] | {"label": "supported"}
+    path.write_text(json.dumps(broken) + "\n")
+    assert main(cli_args(tiny_corpus, path, "label-check")) == 1
+    assert "no label, evidence or edge case" in capsys.readouterr().out
