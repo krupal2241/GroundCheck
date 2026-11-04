@@ -45,7 +45,7 @@ REPO = Path(__file__).resolve().parents[1]
 # --- Questions --------------------------------------------------------------------------
 
 
-def test_committed_template_has_ten_typed_slots_per_labeled_company():
+def test_committed_questions_have_ten_typed_slots_per_labeled_company():
     companies = load_companies()
     labeled = [c.ticker for c in companies.companies if c.role == "labeled"]
     path = REPO / "data" / "questions" / "candidate_questions.yaml"
@@ -54,7 +54,15 @@ def test_committed_template_has_ten_typed_slots_per_labeled_company():
     for ticker in labeled:
         mine = [q for q in questions if q.ticker == ticker]
         assert tuple(q.qtype for q in mine) == TEMPLATE_SLOTS
-        assert all(q.question == "" for q in mine)  # no question is pre-written
+    # With the retrieval questions, ~10 questions per labeled company in the PLAN.md mix.
+    collected = collect_questions(
+        companies,
+        path,
+        REPO / "data" / "eval" / "retrieval_questions.yaml",
+    )
+    for ticker in labeled:
+        mine = sorted(q.qtype for q in collected if q.ticker == ticker)
+        assert mine == sorted(TEMPLATE_SLOTS)
     assert {"BRK-B", "JPM"}.isdisjoint(q.ticker for q in questions)
     assert {"numeric_lookup", "table", "multi_step", "yes_no", "temporal", "unanswerable"} == set(
         TEMPLATE_SLOTS

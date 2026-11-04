@@ -1,6 +1,6 @@
 import pytest
 
-from groundcheck.chunking.base import Chunk
+from groundcheck.chunking.base import Chunk, chunks_path, read_chunks
 from groundcheck.config import REPO_ROOT, ConfigError
 from groundcheck.retrieval.evaluate import (
     RetrievalQuestion,
@@ -166,13 +166,17 @@ def test_check_questions_finds_problems():
 # --- question file -----------------------------------------------------------------------
 
 
-def test_committed_template_is_valid_and_unfilled():
+def test_committed_question_file_is_filled_and_gold_is_in_the_chunks():
     path = REPO_ROOT / "data" / "eval" / "retrieval_questions.yaml"
     questions = load_questions(path).questions
     assert len(questions) == 30
     assert {x.ticker for x in questions} == {"AAPL", "MSFT", "AMZN", "WMT", "XOM", "JNJ"}
-    # No gold label is ever written for you: the template ships empty.
-    assert not any(x.gold_evidence for x in questions)
+    assert all(x.is_filled and x.qtype != "unanswerable" for x in questions)
+    corpora = {
+        t: read_chunks(chunks_path(t, REPO_ROOT / "data" / "chunks"))
+        for t in {x.ticker for x in questions}
+    }
+    assert check_questions(questions, corpora) == []
 
 
 def test_question_file_rejects_typos_and_duplicates(tmp_path):

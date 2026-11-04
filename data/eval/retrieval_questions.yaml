@@ -1,7 +1,9 @@
-# Retrieval evaluation questions (template). Fill these in yourself.
+# Retrieval evaluation questions.
 #
-# Ground rule: gold evidence is written by a human. Claude may suggest question
-# wording, but every gold_evidence string must be copied by you from the parsed text.
+# The entries below were drafted by Claude at the project owner's request, with every
+# gold_evidence string copied verbatim from data/chunks/<TICKER>.jsonl and checked with
+# `groundcheck eval-retrieval --check`. Review them (see the PR that added them for the
+# entries flagged as least certain) before treating them as final gold.
 #
 # How to fill in an entry:
 #   1. Open data/parsed/<TICKER>.txt (made by `groundcheck parse`).
@@ -34,210 +36,246 @@ questions:
   - id: AAPL-01
     ticker: AAPL
     qtype: numeric_lookup
-    question: ""
-    gold_evidence: []
-    gold_items: []
-    notes: ""
+    question: "How much cash did Apple spend buying back its own shares in fiscal 2025?"
+    gold_evidence:
+      - "During 2025, the Company repurchased $89.3 billion of its common stock"
+    gold_items: ["7"]
+    notes: "MD&A, Capital Return Program. Answer: $89.3 billion."
   - id: AAPL-02
     ticker: AAPL
     qtype: table
-    question: ""
-    gold_evidence: []
-    gold_items: []
-    notes: ""
+    question: "What were Apple's net sales in the Greater China region in fiscal 2025, and how did they change from fiscal 2024?"
+    gold_evidence:
+      - "Greater China | 64,377 | (4)% | 66,952 | (8)% | 72,559"
+    gold_items: ["7"]
+    notes: "MD&A segment table (dollars in millions). Answer: $64,377M, down 4% from $66,952M."
   - id: AAPL-03
     ticker: AAPL
     qtype: multi_step
-    question: ""
-    gold_evidence: []
-    gold_items: []
-    notes: ""
+    question: "In total, how much of Apple's manufacturing and other purchase commitments come due within the next year, as of the end of fiscal 2025?"
+    gold_evidence:
+      - "the Company had manufacturing purchase obligations of $56.2 billion, with $55.4 billion payable within 12 months"
+      - "the Company had other purchase obligations of $14.8 billion, with $7.0 billion payable within 12 months"
+    gold_items: ["7"]
+    notes: "Two sentences in MD&A Liquidity. Answer: $55.4B + $7.0B = $62.4 billion."
   - id: AAPL-04
     ticker: AAPL
     qtype: yes_no
-    question: ""
-    gold_evidence: []
-    gold_items: []
-    notes: ""
+    question: "Did EU regulators impose a monetary penalty on Apple under the Digital Markets Act during fiscal 2025?"
+    gold_evidence:
+      - "On April 23, 2025, the Commission fined the Company €500 million in the Article 5(4) Investigation"
+    gold_items: ["3"]
+    notes: "Item 3 Legal Proceedings. Answer: yes, a €500 million fine (which Apple has appealed)."
   - id: AAPL-05
     ticker: AAPL
     qtype: temporal
-    question: ""
-    gold_evidence: []
-    gold_items: []
-    notes: ""
+    question: "Did Apple's fiscal 2023 contain the same number of weeks as fiscal 2025?"
+    gold_evidence:
+      - "fiscal years 2025 and 2024 spanned 52 weeks each, whereas fiscal year 2023 spanned 53 weeks"
+    gold_items: ["7"]
+    notes: "MD&A Fiscal Period (also in Note 1). Answer: no; 2023 had 53 weeks, 2025 had 52."
   - id: MSFT-01
     ticker: MSFT
     qtype: numeric_lookup
-    question: ""
-    gold_evidence: []
-    gold_items: []
-    notes: ""
+    question: "How large was Microsoft's contracted commercial backlog at the end of fiscal 2026, and how fast did it grow?"
+    gold_evidence:
+      - "Commercial remaining performance obligation increased 84% to $678 billion."
+    gold_items: ["7"]
+    notes: "MD&A highlights. Answer: $678 billion, up 84%."
   - id: MSFT-02
     ticker: MSFT
     qtype: table
-    question: ""
-    gold_evidence: []
-    gold_items: []
-    notes: ""
+    question: "How much revenue did LinkedIn bring in for Microsoft in fiscal 2026?"
+    gold_evidence:
+      - "LinkedIn | 19,817 | 17,812 | 16,372"
+    gold_items: ["8"]
+    notes: "Item 8 revenue by product/service table (in millions; 2026, 2025, 2024). Answer: $19,817M."
   - id: MSFT-03
     ticker: MSFT
     qtype: multi_step
-    question: ""
-    gold_evidence: []
-    gold_items: []
-    notes: ""
+    question: "What share of Microsoft's fiscal 2026 revenue came from Microsoft 365 Commercial products and cloud services?"
+    gold_evidence:
+      - "Microsoft 365 Commercial products and cloud services | 101,997 | 87,767 | 76,969"
+      - "Total revenue | 331,839 | 281,724 | 245,122"
+    gold_items: ["8"]
+    notes: "Two rows of the Item 8 revenue tables. Answer: 101,997 / 331,839 = about 30.7%."
   - id: MSFT-04
     ticker: MSFT
     qtype: yes_no
-    question: ""
-    gold_evidence: []
-    gold_items: []
-    notes: ""
+    question: "Did any single customer make up more than a tenth of Microsoft's sales in fiscal 2026?"
+    gold_evidence:
+      - "No sales to an individual customer or country other than the United States accounted for more than 10% of revenue for fiscal years 2026, 2025, or 2024."
+    gold_items: ["8"]
+    notes: "Segment note in Item 8. Answer: no."
   - id: MSFT-05
     ticker: MSFT
     qtype: temporal
-    question: ""
-    gold_evidence: []
-    gold_items: []
-    notes: ""
+    question: "Was Microsoft's bottom-line growth in fiscal 2026 faster or slower than in fiscal 2025?"
+    gold_evidence:
+      - "Net income | $133,749 | $101,832 | $88,136 | 31% | 16%"
+    gold_items: ["7"]
+    notes: "MD&A non-GAAP reconciliation table. Answer: faster; GAAP net income grew 31% in FY2026 vs 16% in FY2025."
   - id: AMZN-01
     ticker: AMZN
     qtype: numeric_lookup
-    question: ""
-    gold_evidence: []
-    gold_items: []
-    notes: ""
+    question: "How much additional capital did Amazon put into Anthropic during 2025?"
+    gold_evidence:
+      - "including $2.7 billion we invested in 2025"
+    gold_items: ["7"]
+    notes: "MD&A investing cash flows. Answer: $2.7 billion (convertible notes)."
   - id: AMZN-02
     ticker: AMZN
     qtype: table
-    question: ""
-    gold_evidence: []
-    gold_items: []
-    notes: ""
+    question: "How much revenue did Amazon earn from selling ads in 2025?"
+    gold_evidence:
+      - "Advertising services (4) | 46,906 | 56,214 | 68,635"
+    gold_items: ["8"]
+    notes: "Item 8 net sales by groups of similar products (2023, 2024, 2025 order). Answer: $68,635M."
   - id: AMZN-03
     ticker: AMZN
     qtype: multi_step
-    question: ""
-    gold_evidence: []
-    gold_items: []
-    notes: ""
+    question: "What was Amazon's net profit margin in 2025?"
+    gold_evidence:
+      - "Total net sales | 574,785 | 637,959 | 716,924"
+      - "Net income | $30,425 | $59,248 | $77,670"
+    gold_items: ["8"]
+    notes: "Two Item 8 rows (columns 2023, 2024, 2025). Answer: 77,670 / 716,924 = about 10.8%."
   - id: AMZN-04
     ticker: AMZN
     qtype: yes_no
-    question: ""
-    gold_evidence: []
-    gold_items: []
-    notes: ""
+    question: "Did Amazon resolve any of its litigation with U.S. federal regulators during 2025?"
+    gold_evidence:
+      - "The increase in 2025 was primarily related to the settlement of a lawsuit with the Federal Trade Commission"
+    gold_items: ["7"]
+    notes: "MD&A, Other Operating Expense (Income), Net. Answer: yes, it settled an FTC lawsuit in Q3 2025."
   - id: AMZN-05
     ticker: AMZN
     qtype: temporal
-    question: ""
-    gold_evidence: []
-    gold_items: []
-    notes: ""
+    question: "Did Amazon's financing activities move from a net cash outflow to a net inflow between 2024 and 2025?"
+    gold_evidence:
+      - "Cash provided by (used in) financing activities was $(11.8) billion and $9.7 billion in 2024 and 2025."
+    gold_items: ["7"]
+    notes: "MD&A Liquidity. Answer: yes; $(11.8)B in 2024 to $9.7B in 2025."
   - id: WMT-01
     ticker: WMT
     qtype: numeric_lookup
-    question: ""
-    gold_evidence: []
-    gold_items: []
-    notes: ""
+    question: "How much does Walmart plan to spend on capital projects in the fiscal year ending January 31, 2027?"
+    gold_evidence:
+      - "we project capital expenditures will be approximately $25 billion to $27 billion"
+    gold_items: ["7"]
+    notes: "MD&A Liquidity. Answer: about $25-27 billion. A forward-looking figure the company does give."
   - id: WMT-02
     ticker: WMT
     qtype: table
-    question: ""
-    gold_evidence: []
-    gold_items: []
-    notes: ""
+    question: "What long-term credit rating does Moody's assign to Walmart?"
+    gold_evidence:
+      - "Moody's Investors Service | P-1 | Aa2"
+    gold_items: ["7"]
+    notes: "MD&A credit ratings table (commercial paper | long-term debt). Answer: Aa2."
   - id: WMT-03
     ticker: WMT
     qtype: multi_step
-    question: ""
-    gold_evidence: []
-    gold_items: []
-    notes: ""
+    question: "What percentage of Walmart's fiscal 2026 operating cash flow was used to buy back stock?"
+    gold_evidence:
+      - "Total amount paid for share repurchases | $8,088 | $4,494 | $2,779"
+      - "Net cash provided by operating activities | $41,565 | $36,443 | $35,726"
+    gold_items: ["7"]
+    notes: "Two MD&A table rows (fiscal 2026, 2025, 2024). Answer: 8,088 / 41,565 = about 19.5%."
   - id: WMT-04
     ticker: WMT
     qtype: yes_no
-    question: ""
-    gold_evidence: []
-    gold_items: []
-    notes: ""
+    question: "Is Walmart raising its per-share payout to shareholders for fiscal 2027?"
+    gold_evidence:
+      - "the Company approved the fiscal 2027 annual dividend of $0.99 per share, an increase over the fiscal 2026 annual dividend of $0.94 per share"
+    gold_items: ["7"]
+    notes: "MD&A Dividends (also Note 12, with slightly different wording). Answer: yes, $0.94 to $0.99."
   - id: WMT-05
     ticker: WMT
     qtype: temporal
-    question: ""
-    gold_evidence: []
-    gold_items: []
-    notes: ""
+    question: "Did same-store sales growth in Walmart's U.S. segment speed up or slow down in fiscal 2026 compared with the year before?"
+    gold_evidence:
+      - "Walmart U.S. comparable sales increased 4.3% and 4.8% in fiscal 2026 and 2025, respectively."
+    gold_items: ["7"]
+    notes: "MD&A Comparable Sales (calendar basis). Answer: slowed, from 4.8% to 4.3%."
   - id: XOM-01
     ticker: XOM
     qtype: numeric_lookup
-    question: ""
-    gold_evidence: []
-    gold_items: []
-    notes: ""
+    question: "How much would ExxonMobil's 2026 Upstream after-tax earnings change for each one-dollar move in the oil benchmark price?"
+    gold_evidence:
+      - "For the year 2026, a $1 per barrel change in the Brent price would have an approximately $700 million annual after-tax effect on Upstream consolidated plus equity company earnings"
+    gold_items: ["7"]
+    notes: "MD&A Market Risks. Answer: about $700 million per $1/bbl Brent."
   - id: XOM-02
     ticker: XOM
     qtype: table
-    question: ""
-    gold_evidence: []
-    gold_items: []
-    notes: ""
+    question: "What were ExxonMobil's total proved reserves on an oil-equivalent basis at year-end 2025?"
+    gold_evidence:
+      - "Total Proved Reserves | 8,187 | 2,437 | 2,330 | 288 | 36,408 | 19,311"
+    gold_items: ["2"]
+    notes: "Item 2 reserves table; last column is oil-equivalent (million bbls). Answer: 19,311 million barrels. Hard: must pick the right column."
   - id: XOM-03
     ticker: XOM
     qtype: multi_step
-    question: ""
-    gold_evidence: []
-    gold_items: []
-    notes: ""
+    question: "Roughly what share of ExxonMobil's 2025 oil-equivalent output came from the Permian Basin?"
+    gold_evidence:
+      - "2025 production of 4.7 million oil-equivalent barrels per day increased 403 thousand barrels per day from 2024"
+      - "Permian reached 1.6 million net oil-equivalent barrels per day"
+    gold_items: ["7"]
+    notes: "Two sentences in the MD&A Upstream volumes text. Answer: 1.6 / 4.7 = about 34%."
   - id: XOM-04
     ticker: XOM
     qtype: yes_no
-    question: ""
-    gold_evidence: []
-    gold_items: []
-    notes: ""
+    question: "Does ExxonMobil intend to keep buying back its stock in 2026?"
+    gold_evidence:
+      - "it expects share repurchases of $20 billion in 2026, assuming reasonable market conditions"
+    gold_items: ["5"]
+    notes: "Item 5 footnote to the issuer purchases table. Answer: yes, about $20 billion."
   - id: XOM-05
     ticker: XOM
     qtype: temporal
-    question: ""
-    gold_evidence: []
-    gold_items: []
-    notes: ""
+    question: "How has ExxonMobil's regular workforce changed in size from 2023 to 2025?"
+    gold_evidence:
+      - "The number of regular employees was 58 thousand, 61 thousand, and 62 thousand at years ended 2025, 2024, and 2023, respectively."
+    gold_items: ["1"]
+    notes: "Item 1 human capital. Answer: fell from 62 thousand (2023) to 61 thousand (2024) to 58 thousand (2025)."
   - id: JNJ-01
     ticker: JNJ
     qtype: numeric_lookup
-    question: ""
-    gold_evidence: []
-    gold_items: []
-    notes: ""
+    question: "Approximately how many people does Johnson & Johnson employ worldwide?"
+    gold_evidence:
+      - "have approximately 138,200 employees worldwide"
+    gold_items: ["1"]
+    notes: "Item 1 opening paragraph. Answer: about 138,200."
   - id: JNJ-02
     ticker: JNJ
     qtype: table
-    question: ""
-    gold_evidence: []
-    gold_items: []
-    notes: ""
+    question: "What were worldwide sales of DARZALEX in 2025, and how fast did they grow?"
+    gold_evidence:
+      - "DARZALEX | 14,351 | 11,670 | 23.0 | 22.0 | 1.0"
+    gold_items: ["7"]
+    notes: "MD&A Innovative Medicine sales table. Answer: $14,351M, up 23.0%."
   - id: JNJ-03
     ticker: JNJ
     qtype: multi_step
-    question: ""
-    gold_evidence: []
-    gold_items: []
-    notes: ""
+    question: "In 2025, how much of the revenue J&J lost on STELARA was offset by the gain on TREMFYA?"
+    gold_evidence:
+      - "STELARA | 6,078 | 10,361 | (41.3) | (41.5) | 0.2"
+      - "TREMFYA | 5,155 | 3,670 | 40.5 | 39.8 | 0.7"
+    gold_items: ["7"]
+    notes: "Two rows of the MD&A Immunology table. Answer: STELARA fell $4,283M; TREMFYA rose $1,485M, offsetting about 35%."
   - id: JNJ-04
     ticker: JNJ
     qtype: yes_no
-    question: ""
-    gold_evidence: []
-    gold_items: []
-    notes: ""
+    question: "Will STELARA still be subject to Medicare's negotiated-price program starting in 2027?"
+    gold_evidence:
+      - "CMS has indicated that, beginning in 2027, it will remove Xarelto and Stelara from the Selected Drug List"
+    gold_items: ["1"]
+    notes: "Item 1, IRA discussion. Answer: no, CMS said it will remove Stelara from the list beginning in 2027."
   - id: JNJ-05
     ticker: JNJ
     qtype: temporal
-    question: ""
-    gold_evidence: []
-    gold_items: []
-    notes: ""
+    question: "How did J&J's research spending and its ratio to sales change from 2024 to 2025?"
+    gold_evidence:
+      - "Total research and development expense | $14,665 | 15.6% | $17,232 | 19.4%"
+    gold_items: ["7"]
+    notes: "MD&A R&D table (2025 amount and % of sales, then 2024). Answer: fell from $17,232M (19.4%) to $14,665M (15.6%)."

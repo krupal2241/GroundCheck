@@ -1,11 +1,15 @@
-# Candidate-generation questions (template). Fill these in yourself.
+# Candidate-generation questions.
 #
 # Every labeled company has ten typed slots (the PLAN.md mix: 2 numeric_lookup,
-# 2 table, 2 multi_step, 1 yes_no, 2 temporal, 1 unanswerable). Write the question
-# text; leave `question: ""` to skip a slot. qtype may be changed.
+# 2 table, 2 multi_step, 1 yes_no, 2 temporal, 1 unanswerable). Five slots per company
+# are filled here; the other five types come from data/eval/retrieval_questions.yaml
+# (one numeric_lookup, table, multi_step, yes_no and temporal question per company),
+# which scripts/generate_candidates.py also uses. Together that is 60 questions,
+# 10 per company, in the PLAN.md mix. Empty slots (`question: ""`) are skipped.
 #
-# You don't need to repeat questions from data/eval/retrieval_questions.yaml:
-# scripts/generate_candidates.py also uses every entry there with a question filled in.
+# The questions were drafted by Claude at the project owner's request using only the
+# text in data/chunks/<TICKER>.jsonl. Each note gives the expected answer and the
+# filing text it comes from; for unanswerable questions it says what was searched.
 #
 # qtype is one of: numeric_lookup, table, multi_step, yes_no, temporal, unanswerable
 #   numeric_lookup  "What was total net sales in fiscal 2025?"
@@ -20,8 +24,9 @@ questions:
 - id: AAPL-G01
   ticker: AAPL
   qtype: numeric_lookup
-  question: ''
-  notes: ''
+  question: How many full-time equivalent employees did Apple have at the end of fiscal 2025?
+  notes: 'Item 1 Human Capital: ''As of September 27, 2025, the Company had approximately 166,000 full-time
+    equivalent employees.'' Answer: about 166,000.'
 - id: AAPL-G02
   ticker: AAPL
   qtype: numeric_lookup
@@ -30,8 +35,9 @@ questions:
 - id: AAPL-G03
   ticker: AAPL
   qtype: table
-  question: ''
-  notes: ''
+  question: What was the value of Apple's inventories on its balance sheet at the end of fiscal 2025 compared
+    with fiscal 2024?
+  notes: 'Item 8 balance sheet row ''Inventories | 5,718 | 7,286'' ($M). Answer: $5,718M vs $7,286M.'
 - id: AAPL-G04
   ticker: AAPL
   qtype: table
@@ -40,8 +46,10 @@ questions:
 - id: AAPL-G05
   ticker: AAPL
   qtype: multi_step
-  question: ''
-  notes: ''
+  question: By how many percentage points did Apple's effective tax rate fall from fiscal 2024 to fiscal
+    2025?
+  notes: 'MD&A tax table row ''Effective tax rate | 15.6% | 24.1% | 14.7%''. Answer: 24.1% - 15.6% = 8.5
+    points (mainly the State Aid Decision charge in 2024).'
 - id: AAPL-G06
   ticker: AAPL
   qtype: multi_step
@@ -55,8 +63,10 @@ questions:
 - id: AAPL-G08
   ticker: AAPL
   qtype: temporal
-  question: ''
-  notes: ''
+  question: How did Apple's Services net sales growth in fiscal 2025 compare with its growth in fiscal
+    2024?
+  notes: 'MD&A table row ''Services (1) | 109,158 | 14% | 96,169 | 13% | 85,200''. Answer: 14% in 2025
+    vs 13% in 2024.'
 - id: AAPL-G09
   ticker: AAPL
   qtype: temporal
@@ -65,13 +75,16 @@ questions:
 - id: AAPL-G10
   ticker: AAPL
   qtype: unanswerable
-  question: ''
-  notes: ''
+  question: How many iPhone units did Apple sell in fiscal 2025?
+  notes: 'Unanswerable: the 10-K reports iPhone net sales ($209,586M) but no unit volumes. Searched AAPL
+    chunks for ''unit sales'', ''units sold'', ''unit volume'' and ''unit''; only RSU and audit-standard
+    matches.'
 - id: MSFT-G01
   ticker: MSFT
   qtype: numeric_lookup
-  question: ''
-  notes: ''
+  question: How much revenue did the Microsoft Cloud generate in fiscal 2026?
+  notes: 'MD&A highlights: ''Microsoft Cloud revenue increased 27% to $214.4 billion.'' Answer: $214.4
+    billion.'
 - id: MSFT-G02
   ticker: MSFT
   qtype: numeric_lookup
@@ -80,8 +93,8 @@ questions:
 - id: MSFT-G03
   ticker: MSFT
   qtype: table
-  question: ''
-  notes: ''
+  question: What did Microsoft spend on research and development in fiscal 2026?
+  notes: 'MD&A table row ''Research and development | $35,562 | $32,488 | 9%''. Answer: $35,562M, up 9%.'
 - id: MSFT-G04
   ticker: MSFT
   qtype: table
@@ -90,8 +103,9 @@ questions:
 - id: MSFT-G05
   ticker: MSFT
   qtype: multi_step
-  question: ''
-  notes: ''
+  question: What was Microsoft's operating margin in fiscal 2026, and how did it compare with fiscal 2025?
+  notes: 'MD&A summary table: ''Revenue | $331,839 | $281,724 | 18%'' and ''Operating income | 155,237
+    | 128,528 | 21%''. Answer: about 46.8% in FY2026 vs about 45.6% in FY2025.'
 - id: MSFT-G06
   ticker: MSFT
   qtype: multi_step
@@ -105,8 +119,10 @@ questions:
 - id: MSFT-G08
   ticker: MSFT
   qtype: temporal
-  question: ''
-  notes: ''
+  question: How much of Microsoft's unearned revenue at June 30, 2026 is expected to be recognized in
+    the quarter ending December 31, 2026?
+  notes: 'MD&A unearned revenue schedule row ''December 31, 2026 | 22,556'' (total $75,712M). Answer:
+    $22,556M. Tests fiscal vs calendar quarter (that is Microsoft''s fiscal Q2 2027).'
 - id: MSFT-G09
   ticker: MSFT
   qtype: temporal
@@ -115,13 +131,16 @@ questions:
 - id: MSFT-G10
   ticker: MSFT
   qtype: unanswerable
-  question: ''
-  notes: ''
+  question: What was Azure's revenue in dollars for fiscal 2026?
+  notes: 'Unanswerable: the filing gives only Azure growth (''Azure and other cloud services revenue grew
+    41%'') and the broader ''Server products and cloud services'' revenue ($129,425M), not an Azure dollar
+    figure. Searched MSFT chunks for ''Azure'' near ''$'' amounts and all table rows containing ''Azure''.'
 - id: AMZN-G01
   ticker: AMZN
   qtype: numeric_lookup
-  question: ''
-  notes: ''
+  question: How many full-time and part-time employees did Amazon have at the end of 2025?
+  notes: 'Item 1 Human Capital: ''As of December 31, 2025, we employed approximately 1,576,000 full-time
+    and part-time employees.'' Answer: about 1,576,000.'
 - id: AMZN-G02
   ticker: AMZN
   qtype: numeric_lookup
@@ -130,8 +149,9 @@ questions:
 - id: AMZN-G03
   ticker: AMZN
   qtype: table
-  question: ''
-  notes: ''
+  question: How much did Amazon spend on property and equipment, net of proceeds and incentives, in 2025?
+  notes: 'MD&A free cash flow table row ''Purchases of property and equipment, net of proceeds from sales
+    and incentives | (77,658) | (128,320)'' (2024, 2025). Answer: $128,320M.'
 - id: AMZN-G04
   ticker: AMZN
   qtype: table
@@ -140,8 +160,8 @@ questions:
 - id: AMZN-G05
   ticker: AMZN
   qtype: multi_step
-  question: ''
-  notes: ''
+  question: By how much did Amazon's free cash flow decline from 2024 to 2025?
+  notes: 'MD&A row ''Free cash flow | $38,219 | $11,194'' (2024, 2025). Answer: down $27,025M, about 71%.'
 - id: AMZN-G06
   ticker: AMZN
   qtype: multi_step
@@ -155,8 +175,8 @@ questions:
 - id: AMZN-G08
   ticker: AMZN
   qtype: temporal
-  question: ''
-  notes: ''
+  question: Did AWS make up a larger share of Amazon's total net sales in 2025 than in 2024?
+  notes: 'MD&A Net Sales Mix rows: ''AWS | 17 | 18'' (percent, 2024 then 2025). Answer: yes, 18% vs 17%.'
 - id: AMZN-G09
   ticker: AMZN
   qtype: temporal
@@ -165,13 +185,16 @@ questions:
 - id: AMZN-G10
   ticker: AMZN
   qtype: unanswerable
-  question: ''
-  notes: ''
+  question: How many paid Prime members did Amazon have at the end of 2025?
+  notes: 'Unanswerable: the 10-K describes Prime and reports subscription services sales ($49,619M) but
+    gives no member count. Searched AMZN chunks for ''Prime member'', ''members'' and number-plus-''members''
+    patterns.'
 - id: XOM-G01
   ticker: XOM
   qtype: numeric_lookup
-  question: ''
-  notes: ''
+  question: What were ExxonMobil's cash capital expenditures in 2025, and how much of that was acquisitions?
+  notes: 'MD&A Capital and Exploration Expenditures: ''Cash Capex in 2025 was $29.0 billion, including
+    $2.6 billion of acquisitions''. Answer: $29.0 billion, of which $2.6 billion acquisitions.'
 - id: XOM-G02
   ticker: XOM
   qtype: numeric_lookup
@@ -180,8 +203,10 @@ questions:
 - id: XOM-G03
   ticker: XOM
   qtype: table
-  question: ''
-  notes: ''
+  question: What did ExxonMobil's Chemical Products segment earn in 2025 under U.S. GAAP?
+  notes: 'MD&A Chemical Products Financial Results table, ''Total | 800 | 2,577 | 1,637'' ($M; 2025, 2024,
+    2023). Answer: $800M, down from $2,577M. The row label is only ''Total'', so the model must use table
+    context.'
 - id: XOM-G04
   ticker: XOM
   qtype: table
@@ -190,8 +215,9 @@ questions:
 - id: XOM-G05
   ticker: XOM
   qtype: multi_step
-  question: ''
-  notes: ''
+  question: By what percentage did ExxonMobil's Upstream earnings fall from 2024 to 2025?
+  notes: 'MD&A Upstream Financial Results table, ''Total | 21,354 | 25,390 | 21,308'' ($M). Answer: down
+    $4,036M, about 15.9%.'
 - id: XOM-G06
   ticker: XOM
   qtype: multi_step
@@ -205,8 +231,9 @@ questions:
 - id: XOM-G08
   ticker: XOM
   qtype: temporal
-  question: ''
-  notes: ''
+  question: How did ExxonMobil's average realized Brent price change from 2023 to 2025?
+  notes: 'MD&A realizations table row ''Brent ($ per barrel) | 69.06 | 80.76 | 82.62'' (2025, 2024, 2023).
+    Answer: fell from $82.62 to $80.76 to $69.06.'
 - id: XOM-G09
   ticker: XOM
   qtype: temporal
@@ -215,13 +242,16 @@ questions:
 - id: XOM-G10
   ticker: XOM
   qtype: unanswerable
-  question: ''
-  notes: ''
+  question: What Brent crude price does ExxonMobil assume in its Corporate Plan for 2026?
+  notes: 'Unanswerable: the filing says the Corporate Plan sets ''Price ranges for crude oil and natural
+    gas'' but gives no number; it gives only a sensitivity (~$700M per $1/bbl) and past realizations.
+    Searched XOM chunks for ''Brent'', ''price assumption'', ''planning price'' and ''Corporate Plan''.'
 - id: JNJ-G01
   ticker: JNJ
   qtype: numeric_lookup
-  question: ''
-  notes: ''
+  question: What were Johnson & Johnson's total worldwide sales in 2025?
+  notes: 'MD&A: ''In 2025, worldwide sales increased 6.0% to $94.2 billion as compared to an increase
+    of 4.3% in 2024.'' Answer: $94.2 billion.'
 - id: JNJ-G02
   ticker: JNJ
   qtype: numeric_lookup
@@ -230,8 +260,9 @@ questions:
 - id: JNJ-G03
   ticker: JNJ
   qtype: table
-  question: ''
-  notes: ''
+  question: What were Abiomed's sales in 2025?
+  notes: 'MD&A MedTech table row ''Abiomed | 1,751 | 1,496 | 17.1 | 16.2 | 0.9''. Answer: $1,751M, up
+    17.1%.'
 - id: JNJ-G04
   ticker: JNJ
   qtype: table
@@ -240,8 +271,10 @@ questions:
 - id: JNJ-G05
   ticker: JNJ
   qtype: multi_step
-  question: ''
-  notes: ''
+  question: By how many percentage points did the Innovative Medicine segment's pre-tax margin improve
+    from 2024 to 2025?
+  notes: 'MD&A segment table row ''Innovative Medicine | $22,266 | 18,919 | 60,401 | 56,964 | 36.9% |
+    33.2''. Answer: 36.9% - 33.2% = 3.7 points.'
 - id: JNJ-G06
   ticker: JNJ
   qtype: multi_step
@@ -255,8 +288,9 @@ questions:
 - id: JNJ-G08
   ticker: JNJ
   qtype: temporal
-  question: ''
-  notes: ''
+  question: How did growth in J&J's U.S. sales in 2025 compare with growth in 2024?
+  notes: 'MD&A: ''Sales by U.S. companies were $53.8 billion in 2025 and $50.3 billion in 2024. This represents
+    increases of 6.9% in 2025 and 8.3% in 2024.'' Answer: slowed from 8.3% to 6.9%.'
 - id: JNJ-G09
   ticker: JNJ
   qtype: temporal
@@ -265,13 +299,15 @@ questions:
 - id: JNJ-G10
   ticker: JNJ
   qtype: unanswerable
-  question: ''
-  notes: ''
+  question: What sales does Johnson & Johnson forecast for STELARA in 2026?
+  notes: 'Unanswerable: the filing says biosimilars ''will continue to negatively impact the Company’s
+    sales of STELARA'' but gives no forecast figure; STELARA 2026 mentions concern only IRA price rules.
+    Searched JNJ chunks for ''STELARA'' near ''2026''/''2027'', ''guidance'' and ''expects sales''.'
 - id: WMT-G01
   ticker: WMT
   qtype: numeric_lookup
-  question: ''
-  notes: ''
+  question: Roughly how many associates did Walmart employ as of January 31, 2026?
+  notes: 'Item 1: ''approximately 2.1 million associates as of January 31, 2026''. Answer: about 2.1 million.'
 - id: WMT-G02
   ticker: WMT
   qtype: numeric_lookup
@@ -280,8 +316,10 @@ questions:
 - id: WMT-G03
   ticker: WMT
   qtype: table
-  question: ''
-  notes: ''
+  question: How much capital did Walmart spend on new stores and clubs, including expansions and relocations,
+    in fiscal 2026?
+  notes: 'MD&A capex allocation row ''New stores and clubs, including expansions and relocations | 1,406
+    | 450''. Answer: $1,406M, up from $450M.'
 - id: WMT-G04
   ticker: WMT
   qtype: table
@@ -290,8 +328,8 @@ questions:
 - id: WMT-G05
   ticker: WMT
   qtype: multi_step
-  question: ''
-  notes: ''
+  question: By what percentage did Walmart's free cash flow grow in fiscal 2026?
+  notes: 'MD&A row ''Free cash flow | $14,923 | $12,660 | $15,120''. Answer: up $2,263M, about 17.9%.'
 - id: WMT-G06
   ticker: WMT
   qtype: multi_step
@@ -305,8 +343,10 @@ questions:
 - id: WMT-G08
   ticker: WMT
   qtype: temporal
-  question: ''
-  notes: ''
+  question: Was Sam's Club U.S. comparable sales growth, including fuel, stronger or weaker in fiscal
+    2026 than in fiscal 2025?
+  notes: 'MD&A comparable sales table row ''Sam''s Club U.S. | 2.9% | 4.7% | (1.9)% | (1.5)%''. Answer:
+    weaker, 2.9% vs 4.7%.'
 - id: WMT-G09
   ticker: WMT
   qtype: temporal
@@ -315,5 +355,6 @@ questions:
 - id: WMT-G10
   ticker: WMT
   qtype: unanswerable
-  question: ''
-  notes: ''
+  question: How many Walmart+ members did Walmart have at the end of fiscal 2026?
+  notes: 'Unanswerable: Walmart+ benefits and member engagement are described, but no member count is
+    given. Searched WMT chunks for ''Walmart+'', ''members'' and number-plus-''members'' patterns.'
