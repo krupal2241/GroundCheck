@@ -1,0 +1,243 @@
+# Retrieval evaluation questions (template). Fill these in yourself.
+#
+# Ground rule: gold evidence is written by a human. Claude may suggest question
+# wording, but every gold_evidence string must be copied by you from the parsed text.
+#
+# How to fill in an entry:
+#   1. Open data/parsed/<TICKER>.txt (made by `groundcheck parse`).
+#   2. Write the question.
+#   3. Copy the exact text that answers it into gold_evidence. Keep each string short
+#      (a phrase or one table row, well under 50 words) so it can't straddle two chunks.
+#      Matching is exact after collapsing whitespace, so copy; don't retype.
+#      Table rows look like: Total net sales | $416,161 | $391,035
+#   4. multi_step questions: one gold string per value used (recall gives partial credit).
+#   5. gold_items is optional: the Item section(s) the answer should come from, e.g.
+#      ["7"] or ["8"]. If left empty, it is inferred from where the gold strings occur.
+#   6. Run `groundcheck eval-retrieval --check` (no model needed) to catch typos.
+#
+# Entries with an empty question or empty gold_evidence are skipped as "unfilled".
+# qtype is one of: numeric_lookup, table, multi_step, yes_no, temporal, unanswerable
+# (unanswerable questions have no gold and are skipped by retrieval eval).
+#
+# Example of a filled entry (made-up text, not from a real filing):
+#   - id: EXCO-01
+#     ticker: EXCO
+#     qtype: table
+#     question: "What were Example Corp's total net sales in 2025?"
+#     gold_evidence:
+#       - "Total net sales | $12,345 | $11,000"
+#     gold_items: ["7"]
+#     notes: "Also in Item 8; MD&A table is the expected hit."
+
+version: 1
+questions:
+  - id: AAPL-01
+    ticker: AAPL
+    qtype: numeric_lookup
+    question: ""
+    gold_evidence: []
+    gold_items: []
+    notes: ""
+  - id: AAPL-02
+    ticker: AAPL
+    qtype: table
+    question: ""
+    gold_evidence: []
+    gold_items: []
+    notes: ""
+  - id: AAPL-03
+    ticker: AAPL
+    qtype: multi_step
+    question: ""
+    gold_evidence: []
+    gold_items: []
+    notes: ""
+  - id: AAPL-04
+    ticker: AAPL
+    qtype: yes_no
+    question: ""
+    gold_evidence: []
+    gold_items: []
+    notes: ""
+  - id: AAPL-05
+    ticker: AAPL
+    qtype: temporal
+    question: ""
+    gold_evidence: []
+    gold_items: []
+    notes: ""
+  - id: MSFT-01
+    ticker: MSFT
+    qtype: numeric_lookup
+    question: ""
+    gold_evidence: []
+    gold_items: []
+    notes: ""
+  - id: MSFT-02
+    ticker: MSFT
+    qtype: table
+    question: ""
+    gold_evidence: []
+    gold_items: []
+    notes: ""
+  - id: MSFT-03
+    ticker: MSFT
+    qtype: multi_step
+    question: ""
+    gold_evidence: []
+    gold_items: []
+    notes: ""
+  - id: MSFT-04
+    ticker: MSFT
+    qtype: yes_no
+    question: ""
+    gold_evidence: []
+    gold_items: []
+    notes: ""
+  - id: MSFT-05
+    ticker: MSFT
+    qtype: temporal
+    question: ""
+    gold_evidence: []
+    gold_items: []
+    notes: ""
+  - id: AMZN-01
+    ticker: AMZN
+    qtype: numeric_lookup
+    question: ""
+    gold_evidence: []
+    gold_items: []
+    notes: ""
+  - id: AMZN-02
+    ticker: AMZN
+    qtype: table
+    question: ""
+    gold_evidence: []
+    gold_items: []
+    notes: ""
+  - id: AMZN-03
+    ticker: AMZN
+    qtype: multi_step
+    question: ""
+    gold_evidence: []
+    gold_items: []
+    notes: ""
+  - id: AMZN-04
+    ticker: AMZN
+    qtype: yes_no
+    question: ""
+    gold_evidence: []
+    gold_items: []
+    notes: ""
+  - id: AMZN-05
+    ticker: AMZN
+    qtype: temporal
+    question: ""
+    gold_evidence: []
+    gold_items: []
+    notes: ""
+  - id: WMT-01
+    ticker: WMT
+    qtype: numeric_lookup
+    question: ""
+    gold_evidence: []
+    gold_items: []
+    notes: ""
+  - id: WMT-02
+    ticker: WMT
+    qtype: table
+    question: ""
+    gold_evidence: []
+    gold_items: []
+    notes: ""
+  - id: WMT-03
+    ticker: WMT
+    qtype: multi_step
+    question: ""
+    gold_evidence: []
+    gold_items: []
+    notes: ""
+  - id: WMT-04
+    ticker: WMT
+    qtype: yes_no
+    question: ""
+    gold_evidence: []
+    gold_items: []
+    notes: ""
+  - id: WMT-05
+    ticker: WMT
+    qtype: temporal
+    question: ""
+    gold_evidence: []
+    gold_items: []
+    notes: ""
+  - id: XOM-01
+    ticker: XOM
+    qtype: numeric_lookup
+    question: ""
+    gold_evidence: []
+    gold_items: []
+    notes: ""
+  - id: XOM-02
+    ticker: XOM
+    qtype: table
+    question: ""
+    gold_evidence: []
+    gold_items: []
+    notes: ""
+  - id: XOM-03
+    ticker: XOM
+    qtype: multi_step
+    question: ""
+    gold_evidence: []
+    gold_items: []
+    notes: ""
+  - id: XOM-04
+    ticker: XOM
+    qtype: yes_no
+    question: ""
+    gold_evidence: []
+    gold_items: []
+    notes: ""
+  - id: XOM-05
+    ticker: XOM
+    qtype: temporal
+    question: ""
+    gold_evidence: []
+    gold_items: []
+    notes: ""
+  - id: JNJ-01
+    ticker: JNJ
+    qtype: numeric_lookup
+    question: ""
+    gold_evidence: []
+    gold_items: []
+    notes: ""
+  - id: JNJ-02
+    ticker: JNJ
+    qtype: table
+    question: ""
+    gold_evidence: []
+    gold_items: []
+    notes: ""
+  - id: JNJ-03
+    ticker: JNJ
+    qtype: multi_step
+    question: ""
+    gold_evidence: []
+    gold_items: []
+    notes: ""
+  - id: JNJ-04
+    ticker: JNJ
+    qtype: yes_no
+    question: ""
+    gold_evidence: []
+    gold_items: []
+    notes: ""
+  - id: JNJ-05
+    ticker: JNJ
+    qtype: temporal
+    question: ""
+    gold_evidence: []
+    gold_items: []
+    notes: ""
