@@ -4,7 +4,7 @@ By default it is a crude lexical rule (no model):
 
 - find the unit (table row or sentence) that best covers the claim's words and numbers;
 - supported if it covers at least `support_at` of them and contains every number in
-  the claim;
+  the claim (years aside: in a table the year is in the header row, not the value row);
 - contradicted if the claim has numbers, the unit covers its words well
   (`words_at`) but a number differs;
 - otherwise unsupported.
@@ -13,6 +13,7 @@ Tests can pass `labels` (claim text -> label) or a `responder(claim, chunks) -> 
 instead. It never touches the network or a model.
 """
 
+import re
 from collections.abc import Callable
 
 from groundcheck.verify.base import BaseVerifier, EvidenceChunk, Label, Verification
@@ -22,6 +23,13 @@ from groundcheck.verify.spans import (
     numbers,
     overlap_score,
 )
+
+YEAR_RE = re.compile(r"(?:19|20)\d\d")
+
+
+def values(text: str) -> set[str]:
+    """The text's numbers without years."""
+    return {n for n in numbers(text) if not YEAR_RE.fullmatch(n)}
 
 
 class FakeVerifier(BaseVerifier):
@@ -63,11 +71,13 @@ class FakeVerifier(BaseVerifier):
         )  # fmt: skip
 
     def _rule(self, claim: str, unit: str, coverage: float) -> Label:
-        claim_numbers = numbers(claim)
-        if coverage >= self.support_at and claim_numbers <= numbers(unit):
-            return "supported"
+        claim_values, unit_values = values(claim), values(unit)
         words = content_words(claim)
         word_cover = len(words & content_words(unit)) / len(words) if words else 0.0
-        if claim_numbers and word_cover >= self.words_at and not claim_numbers <= numbers(unit):
+        if claim_values <= unit_values and (
+            coverage >= self.support_at or (claim_values and word_cover >= self.words_at)
+        ):
+            return "supported"
+        if claim_values and word_cover >= self.words_at:
             return "contradicted"
         return "unsupported"
