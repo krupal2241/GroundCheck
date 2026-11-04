@@ -918,3 +918,59 @@ trivial baseline.
 device choice, the threshold, and that a binary model never says contradicted.
 *What they can't check:* the real checkpoints' label order and score quality; those are
 listed for verification on the Mac.
+
+## Verifier evaluation (`verify/evaluate.py`, `verify/costs.py`, `groundcheck eval-verifiers`), Part 2
+
+**What:** `groundcheck eval-verifiers --verifier fake prompted minicheck hhem finetuned`
+runs each chosen verifier over `data/eval/gold_labels.jsonl` (the confirmed labels from
+`export-labels`), checking every claim against exactly the passages stored with it, and
+writes:
+
+- `results/verifier_eval.json`: every metric below, one entry per verifier;
+- `results/verifier_eval.md`: a README-ready summary table, the hosted-cost estimate,
+  and per-verifier detail (per-class table, confusion matrix, breakdowns);
+- `results/predictions/<verifier>.jsonl`: one line per claim (gold, predicted, score,
+  cited span, latency), the input to `error-report` (Part 4).
+
+**Metrics:** accuracy; macro-F1 over the labels present in gold or predictions
+(scikit-learn's default set; a gold label never predicted contributes F1 = 0, so a
+verifier can't hide a class by never predicting it); per-class precision, recall, F1,
+gold count and predicted count (precision is `n/a`, not 0, for a label the verifier
+never predicts); the confusion matrix with gold rows and predicted columns; the
+**binary view** (supported vs contradicted+unsupported: accuracy, precision, recall, F1
+of "supported"), which is the fair comparison for MiniCheck and HHEM; accuracy by
+edge-case tag (`(none)` for untagged) and by company; **evidence agreement**, the
+share of correct supported/contradicted verdicts whose cited span overlaps a gold span
+in the same chunk; and the number of prompted-verifier parse failures. All metric code
+is plain Python and numpy (no scikit-learn), so CI tests it directly.
+
+**Latency and throughput:** latency is the per-claim wall time measured inside
+`BaseVerifier.verify` (all of a claim's passages, including span lookup); p50 and p95
+use numpy's linear-interpolation percentile. Throughput is claims divided by the wall
+time of the whole loop. Model loading is outside both. The prompted verifier runs with
+the LLM cache off unless `--use-cache` is passed, since a cache hit takes ~0 ms.
+Verifiers run one after another, each freed before the next is built, so an 8 GB Mac
+holds one model at a time.
+
+**Merging runs:** a run updates the entries of the verifiers it ran and keeps the rest,
+so `--verifier hhem` today and `--verifier minicheck` tomorrow end up in one table.
+Each entry stores the gold file's sha256; if entries disagree, the Markdown prints a
+warning above the table. `--company` and `--limit` are for smoke tests; a limited run
+also overwrites that verifier's entry, so re-run in full before copying numbers.
+
+**Cost per 1,000 checks:** every built-in verifier runs locally, so the table says
+"$0 (local)". The hosted-model row is an **estimate only**: `config/prices.yaml` is an
+empty template you fill in with prices per million tokens; nothing in it is ever
+called. Estimated cost = 1,000 x (input tokens x input price + output tokens x output
+price) / 1,000,000, where input tokens are the prompted verifier's real prompt
+(system, rules, few-shot examples, the claim's passages and the claim) per gold claim,
+counted as characters / 4, and output tokens are measured from the local prompted run
+if it ran in the same invocation, else `assumed_output_tokens`. Every place it appears
+(JSON field `label`, Markdown heading, table header and each cell) says "estimate".
+*Why chars / 4:* no tokenizer for a hosted model can be loaded offline; the rule is
+stated next to the number.
+
+**faiss is now imported lazily** (`retrieval/index.py`): before, importing the CLI
+loaded faiss for every command, so `eval-verifiers --verifier hhem` would have loaded
+faiss and then torch, which is the OpenMP clash from Part 0. Now faiss loads only
+when an index is built or read.

@@ -58,6 +58,10 @@ from groundcheck.retrieval.evaluate import (
     load_questions,
 )
 from groundcheck.retrieval.index import DEFAULT_INDEX_DIR, CompanyIndex, build_company_index
+from groundcheck.verify.base import VerifierError
+from groundcheck.verify.costs import DEFAULT_PRICES_PATH, load_prices
+from groundcheck.verify.evaluate import DEFAULT_RESULTS_DIR, evaluate_verifiers, load_gold
+from groundcheck.verify.factory import VERIFIER_NAMES, VerifierOptions, make_verifier
 
 
 def cmd_resolve_filings(args: argparse.Namespace) -> int:
@@ -300,6 +304,69 @@ def cmd_export_labels(args: argparse.Namespace) -> int:
     return 0
 
 
+def verifier_options(args: argparse.Namespace) -> VerifierOptions:
+    return VerifierOptions(
+        llm_config=args.llm_config,
+        provider=args.provider,
+        llm_model=args.model,
+        allow_paid=args.allow_paid,
+        use_cache=args.use_cache,
+        model=args.hf_model,
+        revision=args.revision,
+        device=args.device,
+        threshold=args.threshold,
+    )
+
+
+def cmd_eval_verifiers(args: argparse.Namespace) -> int:
+    gold = load_gold(args.gold)
+    if args.company:
+        gold = [g for g in gold if g.ticker in args.company]
+    if args.limit is not None:
+        gold = gold[: args.limit]
+    if not gold:
+        raise ConfigError("no gold labels left after --company/--limit")
+    if args.hf_model and len(args.verifier) > 1:
+        raise ConfigError("--hf-model applies to one verifier; run them one at a time")
+    options = verifier_options(args)
+    prices = load_prices(args.prices)
+    print(f"{len(gold)} gold claim(s) from {args.gold}")
+    evaluate_verifiers(
+        args.verifier,
+        lambda name: make_verifier(name, options),
+        gold,
+        args.gold,
+        args.results_dir,
+        prices,
+    )
+    print(f"Wrote {args.results_dir / 'verifier_eval.json'} and verifier_eval.md")
+    print(f"Per-claim predictions: {args.results_dir / 'predictions'}/")
+    return 0
+
+
+def add_verifier_options(parser: argparse.ArgumentParser) -> None:
+    """Options for building verifiers (and the prompted verifier's LLM)."""
+    add_llm_options(parser)
+    parser.add_argument(
+        "--use-cache",
+        action="store_true",
+        help="prompted: reuse cached LLM replies (off by default: latency would be meaningless)",
+    )
+    parser.add_argument(
+        "--hf-model", default=None, help="minicheck/hhem: a different Hugging Face model ID"
+    )
+    parser.add_argument("--revision", default=None, help="minicheck/hhem: pin a Hub commit")
+    parser.add_argument(
+        "--device", default=None, help="cpu, mps or cuda (default: cuda, else mps, else cpu)"
+    )
+    parser.add_argument(
+        "--threshold",
+        type=float,
+        default=0.5,
+        help="binary verifiers: P(supported) needed to say supported (default 0.5)",
+    )
+
+
 def add_llm_options(parser: argparse.ArgumentParser) -> None:
     """--llm-config, --provider, --model and --allow-paid, shared with the scripts."""
     parser.add_argument("--llm-config", type=Path, default=None, help="default: config/llm.yaml")
@@ -475,6 +542,30 @@ def build_parser() -> argparse.ArgumentParser:
     )
     export.add_argument("--out", type=Path, default=DEFAULT_EXPORT_PATH)
     export.set_defaults(func=cmd_export_labels)
+
+    eval_verifiers = subparsers.add_parser(
+        "eval-verifiers",
+        help="run verifiers over the confirmed gold labels; write results/verifier_eval.*",
+    )
+    eval_verifiers.add_argument(
+        "--verifier",
+        nargs="+",
+        required=True,
+        choices=VERIFIER_NAMES,
+        help="one or more verifiers, run one after another",
+    )
+    eval_verifiers.add_argument("--gold", type=Path, default=DEFAULT_EXPORT_PATH)
+    eval_verifiers.add_argument("--company", nargs="+", metavar="TICKER", help="limit to tickers")
+    eval_verifiers.add_argument("--limit", type=int, default=None, help="first N claims only")
+    eval_verifiers.add_argument("--results-dir", type=Path, default=DEFAULT_RESULTS_DIR)
+    eval_verifiers.add_argument(
+        "--prices",
+        type=Path,
+        default=None,
+        help=f"hosted prices for the cost ESTIMATE (default {DEFAULT_PRICES_PATH.name})",
+    )
+    add_verifier_options(eval_verifiers)
+    eval_verifiers.set_defaults(func=cmd_eval_verifiers)
     return parser
 
 
@@ -490,7 +581,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     try:
         return args.func(args)
-    except (ConfigError, SecRequestError, LLMError) as exc:
+    except (ConfigError, SecRequestError, LLMError, VerifierError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 

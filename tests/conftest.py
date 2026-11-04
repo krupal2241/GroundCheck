@@ -205,3 +205,65 @@ def tiny_corpus(tmp_path):
 
     corpus["generate_args"] = generate_args
     return corpus
+
+
+# --- A small gold-label file (the `export-labels` format) for verifier tests -----------
+
+# (claim_id, ticker, claim, label, evidence (chunk_id, quote) or None, edge_case)
+GOLD_ROWS = [
+    ("EXCO-G01#c01", "EXCO", "Total net sales were $12,345 million in fiscal 2025.",
+     "supported", ("EXCO-7-t0000", "Total net sales | $12,345 | $11,646"), None),
+    ("EXCO-G01#c02", "EXCO", "Total net sales increased 6% in fiscal 2025.",
+     "supported", ("EXCO-7-p0000", "Total net sales increased 6% to $12,345 million"), None),
+    ("EXCO-G01#c03", "EXCO", "Total net sales increased 9% to $13,000 million in fiscal 2025.",
+     "contradicted", ("EXCO-7-p0000", "Total net sales increased 6% to $12,345 million"),
+     "numeric_mismatch"),
+    ("EXCO-G02#c01", "EXCO", "The Company repurchased 40 million shares in fiscal 2025.",
+     "supported", ("EXCO-8-p0000", "repurchased 40 million shares"), None),
+    ("OTHR-G01#c01", "OTHR", "The Company opened 40 new stores in Brazil.",
+     "unsupported", None, "absent_evidence"),
+    ("OTHR-G01#c02", "OTHR", "Operating income was $3,500 million in 2025.",
+     "contradicted", ("EXCO-7-t0000", "Operating income | $3,210 | $2,987"), "table_misread"),
+]  # fmt: skip
+
+
+def gold_record(claim_id, ticker, claim, label, evidence, edge_case):
+    from groundcheck.labeling.schema import make_span
+
+    spans = []
+    if evidence:
+        chunk_id, quote = evidence
+        span = make_span(chunk_id, TINY_CHUNKS[chunk_id][2], quote)
+        assert span is not None, quote
+        spans.append(span.model_dump())
+    return {
+        "claim_id": claim_id,
+        "candidate_id": claim_id.split("#")[0] + "@fake:fake-model",
+        "question_id": claim_id.split("#")[0],
+        "ticker": ticker,
+        "qtype": "numeric_lookup",
+        "question": "Q?",
+        "answer": "A.",
+        "claim": claim,
+        "label": label,
+        "evidence": spans,
+        "edge_case": edge_case,
+        "note": "",
+        "passages": [
+            {"rank": rank, "chunk_id": cid, "text": text}
+            for rank, (cid, (_, _, text)) in enumerate(TINY_CHUNKS.items(), start=1)
+        ],
+        "generator": {"provider": "fake", "model": "fake-model", "model_digest": "fake-digest",
+                      "prompt_version": "v1"},
+    }  # fmt: skip
+
+
+@pytest.fixture
+def gold_path(tmp_path):
+    """data/eval/gold_labels.jsonl-style file with six claims (all three labels)."""
+    import json
+
+    path = tmp_path / "eval" / "gold_labels.jsonl"
+    path.parent.mkdir(parents=True)
+    path.write_text("".join(json.dumps(gold_record(*row)) + "\n" for row in GOLD_ROWS))
+    return path

@@ -46,9 +46,13 @@ Every number below stays **TBD** until a real run produces it. Nothing here is e
 | Verifier | Accuracy | Latency (p50) | Cost / 1,000 checks |
 |---|---|---|---|
 | Fine-tuned small verifier | TBD | TBD | TBD |
-| Prompted frontier judge | TBD | TBD | TBD |
+| Prompted local LLM judge (llama3.2:3b) | TBD | TBD | TBD |
+| Prompted frontier judge | not run ($0 budget); cost estimate only | — | TBD (estimate) |
 | MiniCheck | TBD | TBD | TBD |
 | HHEM | TBD | TBD | TBD |
+
+`groundcheck eval-verifiers` writes the real table to `results/verifier_eval.md`; the
+rows above stay TBD until it has run on the confirmed gold labels.
 
 ## Quickstart
 
