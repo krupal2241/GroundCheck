@@ -1210,3 +1210,75 @@ isn't tuned to one industry. *Cost:* one training company. `build-training-data`
 a WARNING when the train split has fewer than 500 examples, and so does
 `scripts/train_verifier.py`. The 500 threshold is a judgment call: below it a
 DeBERTa-small fine-tune on three classes is mostly noise.
+
+## Generation modes and balanced labeling plans (`generation/modes.py`, `labeling/plan.py`), Overnight Part 2
+
+**The problem:** a 3B model answering from good passages mostly produces supported
+claims. Labeling only those gives a test set with very few contradicted and unsupported
+claims, so accuracy rewards a verifier that always says "supported", and the per-class
+numbers for the two interesting classes rest on a handful of examples.
+
+**`--mode` in `scripts/generate_candidates.py`:**
+
+| Mode | What the model sees | Typical claims |
+|---|---|---|
+| `rag` (default) | the top-k chunks retrieved for the question | mostly supported |
+| `no-context` | nothing: a closed-book prompt (`CLOSED_BOOK_SYSTEM`) with the company name and the question | numbers from memory: contradicted or unsupported |
+| `wrong-context` | top-k chunks for the same question from another company's index, or the best-ranked chunks of the same company from Items the correct passages don't come from | the wrong company's or section's facts, presented as the answer |
+
+*Why natural rather than synthetic errors:* the synthetic perturbations used for
+training (Part 3) are exactly what the fine-tuned verifier learned; a test set built
+from them would measure memorized perturbation rules. Errors the model makes on its own
+are the distribution a deployed verifier would face.
+
+**Decisions:**
+- **The evidence for labeling is always the correct passages.** Every record's
+  `retrieved` field holds the chunks retrieved for its own question, in every mode;
+  what the model actually saw goes in `context` (`[]` for no-context, the mismatched
+  chunks for wrong-context, absent for rag) with `context_source` (`none`,
+  `other-company:MSFT`, `other-item:AAPL Item 1A`). Labeling, `label-check`, export and
+  `eval-verifiers` keep using `retrieved` unchanged, so a no-context claim is judged
+  against what the filing says about the question, not against nothing. The labeler
+  shows a `MODE:` line saying what the model saw.
+- **No abstention sentence in the closed-book prompt.** The point of the mode is what a
+  small model asserts from memory; offering a fixed "I don't know" sentence would turn
+  most answers into abstentions (which have no claims to label).
+- **The wrong-context prompt is the normal rag prompt** (same system prompt, abstention
+  allowed), with only the passages swapped. The model can and sometimes will say the
+  passages don't answer; that is honest behavior, and the claims that do come out are
+  the realistic failure: an answer stitched from the wrong evidence.
+- **`--wrong-context-source mixed`** (default) picks per question, by a sha256 of the
+  question ID (deterministic, unlike Python's salted `hash`), between another company
+  and another Item. The other company is also chosen by hash among every company that
+  has an index (JPM and BRK-B included: they make good wrong context precisely because
+  nobody labels them). If one kind is impossible (no other index, or every deep hit is
+  from the correct Items) the other is used; if both are, the question is reported as
+  failed and retried on the next run. "Other Item" searches the top 60 of the same
+  company's ranking and keeps the best chunks whose Item differs from all of the correct
+  top-k's Items: on-topic words, wrong section.
+- **Candidate IDs include the mode:** `<question id>@<mode>@<provider>:<model>`, so the
+  three modes append side by side and resume independently. Records written before
+  modes existed load as `rag` (the field has a default); their IDs keep the old format.
+- **Training exclusion covers wrong-context passages:** `candidate_chunk_ids` also
+  collects every `context` chunk, since gold claims in that mode restate them.
+- **`eval-verifiers` reports accuracy by generation mode** (gold exports now carry
+  `mode` and `context_source`), next to the edge-case and company breakdowns.
+
+**`groundcheck label-plan --questions N | --claims N`** proposes a balanced sample:
+greedily, the next candidate is the one whose company, question type and mode are the
+least represented so far, each count scaled by how many values that dimension has (so
+3 modes and 6 companies each aim at equal shares); ties are broken by a seeded hash of
+the candidate ID (`--seed`), never file order. Candidates without claims are skipped.
+Claims already in the label file count towards the balance and their candidates are
+not planned again, so a second plan fills the gaps left by the first. The plan is JSON
+(`data/labels/label_plan.json`: target, seed, whether the target was reached, the
+ordered candidate IDs), and `groundcheck label --plan FILE` walks exactly those
+candidates in order (combine with `--only-unlabeled` to resume). *Why greedy rather
+than stratified quotas:* strata are uneven (an unanswerable question in no-context mode
+may have no claims at all), and greedy balancing degrades gracefully when a cell is
+empty. *What it can't balance:* the label itself, which is unknown until labeled; mode
+is the proxy. `label-stats` shows how well that worked.
+
+**`label-stats`** now adds counts by mode and three cross-tables: mode x label, company
+x label, question type x label, so the class balance per mode is visible after each
+session.

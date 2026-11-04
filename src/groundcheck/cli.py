@@ -32,6 +32,7 @@ from groundcheck.config import (
 from groundcheck.edgar.client import SecClient, SecRequestError
 from groundcheck.edgar.download import DEFAULT_RAW_DIR, download_all, resolve_latest_10k
 from groundcheck.generation.pipeline import DEFAULT_CANDIDATES_DIR
+from groundcheck.labeling.plan import DEFAULT_PLAN_PATH, balance_table, load_plan, make_plan
 from groundcheck.labeling.report import check_labels, export_labels, label_stats
 from groundcheck.labeling.session import Labeler
 from groundcheck.labeling.store import (
@@ -270,11 +271,46 @@ def _candidates(args: argparse.Namespace):
 def cmd_label(args: argparse.Namespace) -> int:
     candidates = _candidates(args)
     store = LabelStore(args.labels)
+    if args.plan:
+        ids = load_plan(args.plan)
+        by_id = {c.candidate_id: c for c in candidates}
+        missing = [i for i in ids if i not in by_id]
+        if missing:
+            raise ConfigError(
+                f"{len(missing)} planned candidate(s) not in {args.candidates_dir} "
+                f"(first: {missing[0]}); was the plan made from other candidates?"
+            )
+        candidates = [by_id[i] for i in ids]
+        print(f"Plan {args.plan}: {len(candidates)} candidate(s), in plan order.")
     items = claim_items(candidates)
     done = sum(store.get(i.claim.claim_id) is not None for i in items)
     print(f"{len(items)} claim(s) in {len(candidates)} candidate(s); {done} already labeled.")
     print("Paste evidence exactly as shown; finish a paste with an empty line. q quits.")
     Labeler(store).run(items, only_unlabeled=args.only_unlabeled)
+    return 0
+
+
+def cmd_label_plan(args: argparse.Namespace) -> int:
+    candidates = _candidates(args)
+    labeled = set(LabelStore(args.labels).records) if args.labels.is_file() else set()
+    plan = make_plan(candidates, args.questions, args.claims, args.seed, labeled)
+    by_id = {c.candidate_id: c for c in candidates}
+    chosen = [by_id[i] for i in plan.candidate_ids]
+    n_claims = sum(len(c.claims) for c in chosen)
+    target = ", ".join(f"{k} {v}" for k, v in plan.target.items())
+    print(
+        f"Plan: {len(chosen)} candidate(s), {n_claims} claim(s) (target: {target}; "
+        f"{len(labeled)} claim(s) already labeled count towards the balance)"
+    )
+    if not plan.reached:
+        print("WARNING: not enough unlabeled candidates with claims to reach the target.")
+    print(balance_table(chosen, "claims"))
+    if args.dry_run:
+        print("--dry-run: plan not written.")
+        return 0
+    args.out.parent.mkdir(parents=True, exist_ok=True)
+    args.out.write_text(plan.to_json(candidates))
+    print(f"Wrote {args.out}; label it with: groundcheck label --plan {args.out}")
     return 0
 
 
@@ -648,12 +684,32 @@ def build_parser() -> argparse.ArgumentParser:
     label.add_argument(
         "--only-unlabeled", action="store_true", help="skip claims that already have a label"
     )
+    label.add_argument(
+        "--plan",
+        type=Path,
+        default=None,
+        help="walk through exactly the candidates of a plan from `groundcheck label-plan`",
+    )
     label.set_defaults(func=cmd_label)
+
+    plan = subparsers.add_parser(
+        "label-plan",
+        parents=[label_options],
+        help="propose a sample balanced across companies, question types and modes",
+    )
+    target = plan.add_mutually_exclusive_group(required=True)
+    target.add_argument("--questions", type=int, help="number of candidate answers to plan")
+    target.add_argument("--claims", type=int, help="number of claims to plan")
+    plan.add_argument("--company", nargs="+", metavar="TICKER", help="limit to tickers")
+    plan.add_argument("--seed", type=int, default=0, help="tie-break seed (default 0)")
+    plan.add_argument("--out", type=Path, default=DEFAULT_PLAN_PATH)
+    plan.add_argument("--dry-run", action="store_true", help="print the plan, write nothing")
+    plan.set_defaults(func=cmd_label_plan)
 
     stats = subparsers.add_parser(
         "label-stats",
         parents=[label_options],
-        help="label counts by label, company, question type and edge case",
+        help="label counts by label, mode, company, question type and edge case",
     )
     stats.add_argument("--company", nargs="+", metavar="TICKER", help="limit to tickers")
     stats.set_defaults(func=cmd_label_stats)

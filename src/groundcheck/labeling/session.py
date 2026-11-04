@@ -97,6 +97,12 @@ class Labeler:
         )
         self.out(f"QUESTION: {c.question}")
         self.out(f"ANSWER:   {c.answer}")
+        if c.mode != "rag":
+            seen = "no passages (closed-book)" if c.mode == "no-context" else c.context_source
+            self.out(
+                f"MODE:     {c.mode}; the model saw {seen}. Judge the claim against the "
+                "chunks below, which were retrieved for this question."
+            )
         self.out("RETRIEVED CHUNKS:")
         for chunk in c.retrieved:
             self.out(

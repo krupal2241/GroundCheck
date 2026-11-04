@@ -1,14 +1,15 @@
 """The candidate pipeline and its JSONL records.
 
 Per question: retrieve the top-k chunks from the company's FAISS index, ask the LLM to
-answer from only those chunks, then ask it to split the answer into atomic claims
-(structured JSON, validated, with bounded retries).
+answer (from those chunks in rag mode, closed-book in no-context mode, from mismatched
+chunks in wrong-context mode; see `modes.py`), then ask it to split the answer into
+atomic claims (structured JSON plus the claim validator, with bounded retries).
 
 Output: `data/candidates/<TICKER>.jsonl`, one `CandidateRecord` per line. Files are
 append-only: a record is written (and flushed to disk) as soon as it is complete, and
 a re-run skips every `candidate_id` already present, so an interrupted run resumes
-where it stopped. The candidate ID is `<question id>@<provider>:<model>`, so running a
-second model appends its own records instead of being skipped.
+where it stopped. The candidate ID is `<question id>@<mode>@<provider>:<model>`, so a
+second mode or model appends its own records instead of being skipped.
 """
 
 import datetime as dt
@@ -25,14 +26,17 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from groundcheck import __version__
-from groundcheck.config import REPO_ROOT, LLMConfig
+from groundcheck.config import REPO_ROOT, ConfigError, LLMConfig
 from groundcheck.generation.claims import ClaimFilterStats, split_claims
+from groundcheck.generation.modes import Mode, WrongContextPicker
 from groundcheck.generation.prompts import (
     ANSWER_SYSTEM,
     CLAIMS_SYSTEM,
+    CLOSED_BOOK_SYSTEM,
     PROMPT_VERSION,
     answer_prompt,
     claims_prompt,
+    closed_book_prompt,
     make_request,
 )
 from groundcheck.generation.questions import GenerationQuestion
@@ -77,13 +81,22 @@ class CandidateRecord(BaseModel):
 
     schema_version: Literal[1] = 1
     candidate_id: str
+    # How the model's passages were chosen (generation/modes.py). Records written
+    # before modes existed have no field and are rag.
+    mode: Mode = "rag"
     question_id: str
     ticker: str
     qtype: str
     question: str
     question_source: str
     retrieval: RetrievalInfo
+    # The passages retrieved for THIS question: the evidence shown for labeling, in
+    # every mode. In rag mode the model answered from exactly these.
     retrieved: list[RetrievedChunk]
+    # What the model saw when that differs from `retrieved`: [] in no-context mode, the
+    # mismatched passages in wrong-context mode; None in rag mode.
+    context: list[RetrievedChunk] | None = None
+    context_source: str | None = None  # e.g. "other-company:MSFT", "other-item:AAPL Item 1A"
     answer: str
     claims: list[Claim]
     answer_model: LLMMetadata
@@ -117,8 +130,23 @@ def model_tag(provider: LLMProvider) -> str:
     return f"{provider.name}:{provider.model}"
 
 
-def candidate_id(question_id: str, provider: LLMProvider) -> str:
-    return f"{question_id}@{model_tag(provider)}"
+def candidate_id(question_id: str, provider: LLMProvider, mode: str = "rag") -> str:
+    """`<question id>@<mode>@<provider>:<model>`, e.g. `AAPL-G01@rag@ollama:llama3.2:3b`."""
+    return f"{question_id}@{mode}@{model_tag(provider)}"
+
+
+def to_retrieved(hits: list[Hit]) -> list[RetrievedChunk]:
+    return [
+        RetrievedChunk(
+            rank=h.rank,
+            chunk_id=h.chunk.chunk_id,
+            score=round(h.score, 6),
+            item=h.chunk.item,
+            kind=h.chunk.kind,
+            text=h.chunk.text,
+        )
+        for h in hits
+    ]
 
 
 def candidates_path(ticker: str, candidates_dir: Path = DEFAULT_CANDIDATES_DIR) -> Path:
@@ -170,28 +198,37 @@ class Generator:
     # ticker -> company name (config/companies.yaml); the claim prompt uses the short
     # form ("Apple") in place of "the Company" / "its". Missing: the ticker is used.
     company_names: dict[str, str] = field(default_factory=dict)
+    mode: Mode = "rag"
+    wrong_context: WrongContextPicker | None = None  # required in wrong-context mode
 
     def _request(self, system: str, prompt: str):
         c = self.config
         return make_request(system, prompt, c.temperature, c.seed, c.max_tokens, c.context_window)
 
     def generate(self, question: GenerationQuestion) -> CandidateRecord:
-        hits = self.retrieve(question.ticker, question.question, self.config.top_k)
-        retrieved = [
-            RetrievedChunk(
-                rank=h.rank,
-                chunk_id=h.chunk.chunk_id,
-                score=round(h.score, 6),
-                item=h.chunk.item,
-                kind=h.chunk.kind,
-                text=h.chunk.text,
-            )
-            for h in hits
-        ]
-        passages = [(c.chunk_id, c.text) for c in retrieved]
-        prompt = answer_prompt(question.ticker, question.question, passages)
-        answer = self.provider.generate(self._request(ANSWER_SYSTEM, prompt))
+        k = self.config.top_k
+        hits = self.retrieve(question.ticker, question.question, k)
+        retrieved = to_retrieved(hits)
         company = short_company_name(self.company_names.get(question.ticker, question.ticker))
+        context: list[RetrievedChunk] | None = None
+        context_source: str | None = None
+        if self.mode == "no-context":
+            context, context_source = [], "none"
+            system = CLOSED_BOOK_SYSTEM
+            prompt = closed_book_prompt(company, question.ticker, question.question)
+        else:
+            shown = retrieved
+            if self.mode == "wrong-context":
+                if self.wrong_context is None:
+                    raise ConfigError("wrong-context mode needs a WrongContextPicker")
+                wrong, context_source = self.wrong_context.pick(
+                    question.ticker, question.question, question.id, hits, k
+                )
+                context = shown = to_retrieved(wrong)
+            passages = [(c.chunk_id, c.text) for c in shown]
+            system = ANSWER_SYSTEM
+            prompt = answer_prompt(question.ticker, question.question, passages)
+        answer = self.provider.generate(self._request(system, prompt))
         claims, claims_response, filter_stats = split_claims(
             self.provider,
             self._request(CLAIMS_SYSTEM, claims_prompt(question.question, answer.text, company)),
@@ -199,9 +236,10 @@ class Generator:
             max_json_attempts=self.config.json_max_attempts,
             max_retries=self.config.claim_max_retries,
         )
-        cid = candidate_id(question.id, self.provider)
+        cid = candidate_id(question.id, self.provider, self.mode)
         return CandidateRecord(
             candidate_id=cid,
+            mode=self.mode,
             question_id=question.id,
             ticker=question.ticker,
             qtype=question.qtype,
@@ -209,6 +247,8 @@ class Generator:
             question_source=question.source,
             retrieval=self.retrieval_info(question.ticker),
             retrieved=retrieved,
+            context=context,
+            context_source=context_source,
             answer=answer.text.strip(),
             claims=[
                 Claim(claim_id=f"{cid}#c{i:02d}", text=text)
@@ -253,13 +293,14 @@ def run(
     done: set[str] = set()
     for ticker in sorted({q.ticker for q in questions}):
         done |= {r.candidate_id for r in read_candidates(candidates_path(ticker, candidates_dir))}
-    pending = [q for q in questions if candidate_id(q.id, generator.provider) not in done]
+    mode = generator.mode
+    pending = [q for q in questions if candidate_id(q.id, generator.provider, mode) not in done]
     summary.already_done = len(questions) - len(pending)
     if limit is not None:
         pending = pending[:limit]
     echo(
         f"{len(questions)} question(s): {summary.already_done} already generated, "
-        f"{len(pending)} to do now with {model_tag(generator.provider)}"
+        f"{len(pending)} to do now with {model_tag(generator.provider)}, mode {mode}"
     )
     position = 0
     for number, batch in enumerate(batches(pending, batch_size)):
@@ -271,7 +312,7 @@ def run(
             prefix = f"[{position}/{len(pending)}] {question.id} ({question.qtype})"
             try:
                 record = generator.generate(question)
-            except LLMError as exc:
+            except (LLMError, ConfigError) as exc:
                 summary.failed.append((question.id, str(exc)))
                 echo(f"  {prefix}: FAILED: {exc}")
                 continue

@@ -292,7 +292,7 @@ def test_label_check_passes_and_catches_problems(labeled, tiny_corpus, capsys):
     lines = labeled.read_text().splitlines()
     tampered = json.loads(lines[0])
     tampered["evidence"][0]["text"] = "$12,346 million"  # no longer in the chunk
-    ghost = json.loads(lines[2]) | {"claim_id": "EXCO-99@fake:fake-model#c01"}
+    ghost = json.loads(lines[2]) | {"claim_id": "EXCO-99@rag@fake:fake-model#c01"}
     changed = json.loads(lines[2]) | {"claim": "Something else."}
     labeled.write_text(
         "\n".join([json.dumps(tampered), lines[1], json.dumps(ghost), json.dumps(changed),
@@ -300,10 +300,12 @@ def test_label_check_passes_and_catches_problems(labeled, tiny_corpus, capsys):
     )  # fmt: skip
     assert main(cli_args(tiny_corpus, labeled, "label-check")) == 1
     out = capsys.readouterr().out
-    assert "line 1 (EXCO-01@fake:fake-model#c01): evidence.0: Value error, evidence is not" in out
-    assert "line 3 (EXCO-99@fake:fake-model#c01): no such claim" in out
-    assert "line 4 (EXCO-G02@fake:fake-model#c01): claim text differs" in out
-    assert "line 5 (EXCO-G01@fake:fake-model#c01): duplicate claim_id" in out
+    assert (
+        "line 1 (EXCO-01@rag@fake:fake-model#c01): evidence.0: Value error, evidence is not" in out
+    )
+    assert "line 3 (EXCO-99@rag@fake:fake-model#c01): no such claim" in out
+    assert "line 4 (EXCO-G02@rag@fake:fake-model#c01): claim text differs" in out
+    assert "line 5 (EXCO-G01@rag@fake:fake-model#c01): duplicate claim_id" in out
     assert "line 6: invalid JSON" in out
 
 
@@ -319,6 +321,7 @@ def test_export_keeps_only_confirmed(labeled, tiny_corpus, capsys):
     assert first["question"] and first["answer"] and first["claim"]
     assert [p["chunk_id"] for p in first["passages"]][0] == "EXCO-7-p0000"
     assert first["generator"]["model_digest"] == "fake-digest"
+    assert first["mode"] == "rag" and first["context_source"] is None
     assert "confirmed" not in first  # every exported label is confirmed
     # One invalid record blocks the export entirely.
     labeled.write_text(labeled.read_text() + "{oops\n")

@@ -170,6 +170,8 @@ def candidate_chunk_ids(candidates_dir: Path | None) -> set[str]:
             except json.JSONDecodeError:
                 continue
             ids |= {c["chunk_id"] for c in record.get("retrieved", [])}
+            # wrong-context mode: the mismatched passages the model answered from.
+            ids |= {c["chunk_id"] for c in record.get("context") or []}
     return ids
 
 

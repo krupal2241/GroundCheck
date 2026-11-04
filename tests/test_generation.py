@@ -171,10 +171,10 @@ def test_generator_record_has_everything(tiny_corpus):
         ]
     )
     record = make_generator(tiny_corpus, fake).generate(QUESTION)
-    assert record.candidate_id == "EXCO-G01@fake:fake-model"
+    assert record.candidate_id == "EXCO-G01@rag@fake:fake-model"
     assert [c.claim_id for c in record.claims] == [
-        "EXCO-G01@fake:fake-model#c01",
-        "EXCO-G01@fake:fake-model#c02",
+        "EXCO-G01@rag@fake:fake-model#c01",
+        "EXCO-G01@rag@fake:fake-model#c02",
     ]
     assert len(record.retrieved) == 3 and record.retrieved[0].rank == 1
     assert record.retrieved[0].chunk_id == "EXCO-7-p0000"  # best word overlap
@@ -233,7 +233,7 @@ def test_another_model_appends_its_own_records(tiny_corpus):
     other = FakeProvider(responder=fake_responder, model="other-model")
     assert run(make_generator(tiny_corpus, other), [QUESTION], out).written == 1
     ids = [r.candidate_id for r in read_candidates(candidates_path("EXCO", out))]
-    assert ids == ["EXCO-G01@fake:fake-model", "EXCO-G01@fake:other-model"]
+    assert ids == ["EXCO-G01@rag@fake:fake-model", "EXCO-G01@rag@fake:other-model"]
 
 
 def test_partial_last_line_is_skipped_and_appending_still_works(tiny_corpus, caplog):

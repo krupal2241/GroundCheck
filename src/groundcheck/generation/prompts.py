@@ -25,6 +25,22 @@ million"), and say which fiscal year or period each number belongs to.
 - Tables are written as rows with cells separated by " | "; the first rows are headers.
 - If the passages do not contain the answer, reply exactly: "{ABSTAIN_TEXT}\""""
 
+# no-context mode: the model answers closed-book. There is deliberately no abstention
+# sentence: the point of this mode is to see what a small model states from memory.
+CLOSED_BOOK_SYSTEM = """\
+You answer questions about one company's most recent annual report (Form 10-K) from \
+memory. No documents are provided.
+- Answer in one to four sentences of plain prose. No lists.
+- Give specific figures with their units and scale, and say which fiscal year or period \
+each number belongs to."""
+
+CLOSED_BOOK_MARKER = "Answer from memory."
+
+
+def closed_book_prompt(company: str, ticker: str, question: str) -> str:
+    return f"Company: {company} ({ticker})\n\nQuestion: {question}\n{CLOSED_BOOK_MARKER}"
+
+
 CLAIMS_SYSTEM = """\
 You split an answer about one company's annual report into claims that a fact-checker \
 can verify one at a time. Reply with JSON only."""
@@ -162,6 +178,8 @@ def fake_responder(request: LLMRequest) -> str:
         sentences = [s for s in SENTENCE_END_RE.split(answer.strip()) if s]
         sentences = [_strip_lead(s) for s in sentences]
         return json.dumps({"claims": sentences})
+    if request.prompt.endswith(CLOSED_BOOK_MARKER):
+        return "In fiscal 2025 the company reported total revenue of $1,234 million."
     if "\n[1] (" not in request.prompt:
         return ABSTAIN_TEXT
     first = request.prompt.split("\n[1] (", 1)[1].split("\n", 1)[1].split("\n\n", 1)[0]
