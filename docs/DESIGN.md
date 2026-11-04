@@ -788,3 +788,25 @@ labeling.
   is unsupported.
 - `contradicted` needs a span that makes the claim false; "can't find it" is
   `unsupported`.
+
+## Verifier work, Part 0: tests never import heavy ML packages (`tests/conftest.py`)
+
+**The bug:** `test_hf_local_without_extra_is_a_clean_error` blocked `transformers` with
+`sys.modules["transformers"] = None`, but `HFLocalProvider` imports `torch` first, so
+the test imported the real torch whenever it was installed. On a Mac with the `[embed]`
+extra, faiss and torch each bring their own OpenMP runtime; loading the second one into
+the same process can abort it (`OMP: Error #15`), which kills pytest outright instead
+of failing one test. The test now sets both `torch` and `transformers` to `None`.
+
+**The guard:** `conftest.py` puts a `MetaPathFinder` at the front of `sys.meta_path`
+that refuses `torch`, `transformers`, `sentence_transformers`, `accelerate`, `datasets`,
+`sklearn` and `gradio`. It raises `ModuleNotFoundError` (so a library's optional probe
+behaves as on CI, where none is installed) and records the attempt; an autouse fixture
+fails the test that made it, even when the error was caught by an `except ImportError`.
+The fixture also fails if a real copy (a module with a `__file__`) is already in
+`sys.modules`. Stand-ins and `None` entries in `sys.modules` are resolved before any
+finder is asked, so the two sanctioned patterns keep working: a fake module for the
+happy path, `None` for "extra not installed". *Why not just a lint rule:* the import that
+broke happened inside the package code under test, not in the test file.
+*Alternative:* `pytest --forked` or `KMP_DUPLICATE_LIB_OK=TRUE`; the first hides the
+crash in a child process, the second is Intel's own "may cause incorrect results" switch.

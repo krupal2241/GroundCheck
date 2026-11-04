@@ -376,6 +376,11 @@ def test_hf_local_sampling_uses_the_seed(fake_hf):
 def test_hf_local_without_extra_is_a_clean_error(monkeypatch):
     from groundcheck.llm.hf_local import HFLocalProvider
 
+    # A None entry in sys.modules makes `import x` raise ImportError without looking for
+    # the real package, so this simulates the missing extra without ever importing torch
+    # (a real torch import after faiss can abort the whole process on macOS: two OpenMP
+    # runtimes in one process).
+    monkeypatch.setitem(sys.modules, "torch", None)
     monkeypatch.setitem(sys.modules, "transformers", None)
     with pytest.raises(ConfigError, match=r"\[hf\] extra"):
         HFLocalProvider()
