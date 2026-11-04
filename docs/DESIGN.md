@@ -452,12 +452,19 @@ section seen is XOM Item 2 at 40,860. Key Items are exempt from the upper limit
 because they really are long: JNJ Item 8 is 227,361 and BRK-B Item 1 is 126,647. An
 "Items 1 and 2" section counts as key.
 
-**Why warn on the split as found, even after a recovery:** the warning is the evidence
-that the layout was unusual, and the recovery is a heuristic you should check. So the
-size warnings describe the split before recovery, and after a recovery the sizes are
-checked again and any *new* problem is added too. Nothing that fired is silently
-dropped. *Alternative:* only report sizes after recovery. That hides the fact that
-JPM's sections were rebuilt.
+**After a recovery, NOTE lines replace the size warnings it fixed** (changed on Day 9):
+size warnings are only emitted once recovery has run. If it succeeded, the stub and
+oversized warnings for the sections it rebuilt (the Item 7/8 stubs and the host) are
+dropped, and its NOTE lines (where each recovered section starts) say what happened
+instead. The recovered sections are then size-checked again, so anything still wrong
+(e.g. a host that is oversized even without MD&A) is reported with its new size. If
+recovery fails or doesn't apply (no oversized host), every size warning fires, plus
+recovery's own give-up warning, and the final "N warning(s)" count is the length of
+the stored warning list. *Why the change:* on the Mac, JPM and XOM printed three
+warnings each for a layout that had been handled; a warning should mean "look at
+this", and the NOTE line already carries the line number to check. *Alternative (the
+Day 8 behaviour):* keep the as-found warnings after a recovery. That made a clean
+run look broken.
 
 ### Repeated running headers (`cleanup.py`, `remove_repeated_lines`)
 
@@ -485,6 +492,27 @@ characters. Each removed line and its count is logged at INFO (`groundcheck -v p
 and the total is printed as "repeated header lines removed". *Risk:* a short real line
 that genuinely repeats 8+ times (e.g. a footnote like "(a) Refer to Note 2.") is also
 removed. The INFO log lists every removed line so this can be checked per filing.
+
+**Protected lines (Day 9):** the Mac run showed that some repeated lines are content.
+XOM prints "(millions of dollars)" above every table, and JPM's "partially offset by"
+is the tail of sentences cut by page breaks; removing them loses the unit of every
+number below them, or breaks a sentence. `protected_reason` keeps *every* copy of a
+repeated line that:
+- contains "million", "billion", "thousand", "dollars" or "except per share"
+  (case-insensitive): a scale or unit caption;
+- starts with a lowercase letter: a sentence continuation;
+- is a year-comparison heading: "2025 versus 2024", "2025 compared with 2024",
+  "Fiscal 2026 compared to fiscal 2025", "2025 vs. 2024";
+- is a bare footnote marker: "(1)", "(a)", "(iv)", "*".
+
+Lines are grouped case-insensitively, so if any copy is protected, all copies are
+kept (one lowercase "partially offset by" proves the line is sentence text). Each
+protected line is logged at DEBUG with its count and reason. True page furniture is
+still removed: company names, "PART I/II/IV", "Notes to consolidated financial
+statements", running MD&A headers, separator lines (`____`, `———`) and bare bullet
+glyphs (`•`, `▪`). *Alternative:* a list of known furniture strings per filer. That
+is precise but needs every filing to be inspected and breaks on the next filer; the
+four protection rules are generic and each one came from a real loss.
 
 **Why a table of contents needs page numbers in order:** a table whose rows mostly end
 in a 1 to 3 digit number is a TOC only if there are at least two such rows and the

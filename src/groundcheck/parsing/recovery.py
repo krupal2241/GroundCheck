@@ -67,6 +67,9 @@ class RecoveryResult:
     sections: list[Section]
     notes: list[str] = field(default_factory=list)  # what was recovered (informational)
     warnings: list[str] = field(default_factory=list)
+    # Items of the sections a successful recovery rebuilt (the stubs and the host), whose
+    # size warnings from the original split no longer apply. Empty unless it succeeded.
+    fixed_items: list[str] = field(default_factory=list)
 
 
 def normalize_line(line: str) -> str:
@@ -180,4 +183,5 @@ def recover_cross_reference_layout(
         notes.append(note)
         logger.info("%s: %s", label, note)
     notes.append(f"{host.label} shrunk to {len(remainder.text):,} chars")
-    return RecoveryResult(out, notes=notes)
+    fixed = [s.item for s in stubs] + [host.item]
+    return RecoveryResult(out, notes=notes, fixed_items=fixed)

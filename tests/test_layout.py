@@ -16,7 +16,7 @@ from groundcheck.chunking.fixed import FixedSizeChunker
 from groundcheck.cli import main
 from groundcheck.config import Company
 from groundcheck.parsing import sections as sections_module
-from groundcheck.parsing.cleanup import MIN_REPEATS, remove_repeated_lines
+from groundcheck.parsing.cleanup import MIN_REPEATS, protected_reason, remove_repeated_lines
 from groundcheck.parsing.filing import parse_html
 from groundcheck.parsing.recovery import (
     find_mda_start,
@@ -106,8 +106,9 @@ def test_parse_counts_size_warnings_and_shows_recovery(capsys, tmp_path):
     assert main([*args, "--parsed-dir", str(tmp_path / "parsed")]) == 0
     out = capsys.readouterr().out
     assert "repeated header lines removed: 26" in out
-    assert "WARNING: Item 7 is only" in out and "WARNING: Item 15 has" in out
-    assert "3 warning(s)" in out
+    # Recovery fixed Items 7, 8 and 15, so only its NOTE lines are shown for them.
+    assert "WARNING" not in out
+    assert "0 warning(s)" in out
     assert out.count("recovered=true") == 2
     assert "NOTE: recovered Item 7" in out and "NOTE: Item 15 shrunk to" in out
     saved = json.loads((tmp_path / "parsed" / "BANK.json").read_text())
@@ -167,6 +168,79 @@ def test_header_never_followed_by_prose_is_removed_entirely():
     assert removed == MIN_REPEATS and "Example Corp" not in text
 
 
+@pytest.mark.parametrize(
+    "line",
+    [
+        "(millions of dollars)",  # XOM, above each table
+        "(In millions, except per share amounts)",
+        "Dollars in billions",
+        "(in thousands)",
+        "partially offset by",  # JPM, a sentence cut by a page break
+        "and the impact of lower volumes.",
+        "2025 versus 2024",
+        "2025 compared with 2024",
+        "Fiscal 2026 Compared to Fiscal 2025",
+        "2025 vs. 2024",
+        "(1)",
+        "(a)",
+        "(iv)",
+        "*",
+    ],
+)
+def test_protected_repeated_lines_keep_every_copy(line, caplog):
+    blocks = [b for _ in range(MIN_REPEATS + 2) for b in (line, PROSE)]
+    with caplog.at_level(logging.DEBUG, logger="groundcheck.parsing.cleanup"):
+        text, removed = remove_repeated_lines(doc(*blocks), label="EXCO")
+    assert (text, removed) == (doc(*blocks), 0)
+    assert protected_reason(line) is not None
+    debug = [r for r in caplog.records if r.levelno == logging.DEBUG]
+    assert any(
+        "kept repeated line" in r.getMessage() and "protected" in r.getMessage() for r in debug
+    )
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "Exxon Mobil Corporation",
+        "JPMorgan Chase & Co.",
+        "PART I",
+        "PART II",
+        "PART IV",
+        "Notes to consolidated financial statements",
+        "Management’s discussion and analysis",
+        "MANAGEMENT’S DISCUSSION AND ANALYSIS OF FINANCIAL CONDITION AND RESULTS OF OPERATIONS",
+        "________________________________",
+        "—————",
+        "•",
+        "▪",
+    ],
+)
+def test_page_furniture_is_still_removed(line):
+    assert protected_reason(line) is None
+    blocks = ["Intro", PROSE] + [b for i in range(MIN_REPEATS + 2) for b in (line, f"{i} " + PROSE)]
+    text, removed = remove_repeated_lines(doc(*blocks))
+    kept = text.split("\n\n")
+    assert kept.count(line) <= 1  # at most the copy kept as a real heading
+    assert removed >= MIN_REPEATS + 1
+
+
+def test_one_protected_copy_protects_all_case_variants():
+    # "Partially offset by" and "partially offset by" are the same line case-insensitively;
+    # the lowercase copy proves it is sentence text, so every copy stays.
+    blocks = ["Partially offset by", PROSE]
+    blocks += [b for _ in range(MIN_REPEATS) for b in ("partially offset by", PROSE)]
+    assert remove_repeated_lines(doc(*blocks)) == (doc(*blocks), 0)
+
+
+def test_protected_and_furniture_lines_in_one_filing():
+    furniture, caption = "Example Corp", "(millions of dollars)"
+    blocks = [b for i in range(MIN_REPEATS) for b in (furniture, caption, f"{i} " + PROSE)]
+    text, removed = remove_repeated_lines(doc(*blocks))
+    assert removed == MIN_REPEATS - 1  # the first "Example Corp" is kept as a heading
+    assert text.split("\n\n").count(caption) == MIN_REPEATS
+
+
 # --- Part C: cross-reference layout recovery -----------------------------------------
 
 
@@ -203,7 +277,9 @@ def test_energy_style_layout_is_recovered():
     assert "SIGNATURES" in host.text and "FINANCIAL SECTION" in host.text
     assert "Report of Independent Registered Public Accounting Firm | 69" in host.text
     assert sections["1"].covers == ["1", "2"]
-    assert parsed.warnings[-1].startswith("Item 16 has")  # as found, before recovery
+    # A successful recovery replaces the size warnings with NOTE lines.
+    assert parsed.warnings == []
+    assert any(n.startswith("Item 16 shrunk to") for n in parsed.notes)
 
 
 def test_recovered_filing_chunks_with_unique_ids():
@@ -285,3 +361,76 @@ def test_committed_fixtures_match_their_generator():
     spec.loader.exec_module(build)
     assert (FIXTURES / "xref_bank_style.htm").read_text(encoding="utf-8") == build.bank_style()
     assert (FIXTURES / "xref_energy_style.htm").read_text(encoding="utf-8") == build.energy_style()
+
+
+# --- Size warnings and recovery, end to end through `parse` ----------------------------
+
+LONG = "<p>" + PROSE + "</p>"
+
+
+def _html(*parts):
+    return ("<html><body>" + "".join(parts) + "</body></html>").encode()
+
+
+def _parse_cli(tmp_path, html, capsys):
+    raw = tmp_path / "raw" / "EXCO" / "0000000001-25-000001"
+    raw.mkdir(parents=True)
+    (raw / "exco.htm").write_bytes(html)
+    config = tmp_path / "companies.yaml"
+    config.write_text(
+        "companies:\n"
+        "  - {ticker: EXCO, name: Example Corp, cik: 1, role: labeled,\n"
+        "     accession: '0000000001-25-000001', primary_document: exco.htm}\n"
+    )
+    args = ["parse", "--config", str(config), "--raw-dir", str(tmp_path / "raw")]
+    assert main([*args, "--parsed-dir", str(tmp_path / "parsed")]) == 0
+    out = capsys.readouterr().out
+    saved = json.loads((tmp_path / "parsed" / "EXCO.json").read_text())
+    return out, saved
+
+
+def _front(n_host_paragraphs, *host_extra):
+    return (
+        "<p>Item 1. Business</p>" + LONG * 10,
+        "<p>Item 1A. Risk Factors</p>" + LONG * 10,
+        "<p>Item 7. Management’s Discussion and Analysis</p><p>See pages 50-160.</p>",
+        "<p>Item 8. Financial Statements</p><p>See pages 161-300.</p>",
+        "<p>Item 15. Exhibits</p>" + LONG * n_host_paragraphs,
+        *host_extra,
+    )
+
+
+def test_failed_recovery_keeps_every_size_warning_and_the_count_matches(tmp_path, capsys):
+    out, saved = _parse_cli(tmp_path, _html(*_front(400)), capsys)  # no MD&A start anywhere
+    warnings = saved["warnings"]
+    assert saved["notes"] == []
+    assert any(w.startswith("Item 7 is only") for w in warnings)
+    assert any(w.startswith("Item 8 is only") for w in warnings)
+    assert any(w.startswith("Item 15 has") for w in warnings)
+    assert any("sections left unchanged" in w for w in warnings)
+    assert out.count("  WARNING: ") == len(warnings) == 4
+    assert f"{len(warnings)} warning(s)" in out
+
+
+def test_skipped_recovery_keeps_stub_warnings(tmp_path, capsys):
+    out, saved = _parse_cli(tmp_path, _html(*_front(5)), capsys)  # no oversized host
+    assert saved["notes"] == []
+    assert [w.split(" is only")[0] for w in saved["warnings"]] == ["Item 7", "Item 8"]
+    assert out.count("  WARNING: ") == 2 and "2 warning(s)" in out
+
+
+def test_successful_recovery_still_reports_a_leftover_problem(tmp_path, capsys):
+    # The host is oversized even before MD&A starts, so after recovery it is still
+    # too big: the new size is reported, the stub warnings are not.
+    rest = (
+        "<p>Management’s discussion and analysis</p>" + LONG * 20,
+        "<p>Report of Independent Registered Public Accounting Firm</p>" + LONG * 20,
+    )
+    out, saved = _parse_cli(tmp_path, _html(*_front(400, *rest)), capsys)
+    warnings = saved["warnings"]
+    assert any(n.startswith("recovered Item 7") for n in saved["notes"])
+    assert len(warnings) == 1 and warnings[0].startswith("Item 15 has")
+    shrunk = next(n for n in saved["notes"] if n.startswith("Item 15 shrunk to"))
+    assert shrunk.split("to ")[1].split(" ")[0] in warnings[0]
+    assert not any("is only" in w for w in warnings)
+    assert out.count("  WARNING: ") == 1 and "1 warning(s)" in out
