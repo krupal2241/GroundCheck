@@ -31,6 +31,16 @@ from groundcheck.config import (
 )
 from groundcheck.edgar.client import SecClient, SecRequestError
 from groundcheck.edgar.download import DEFAULT_RAW_DIR, download_all, resolve_latest_10k
+from groundcheck.generation.pipeline import DEFAULT_CANDIDATES_DIR
+from groundcheck.labeling.report import check_labels, export_labels, label_stats
+from groundcheck.labeling.session import Labeler
+from groundcheck.labeling.store import (
+    DEFAULT_EXPORT_PATH,
+    DEFAULT_LABELS_PATH,
+    LabelStore,
+    claim_items,
+    load_candidates,
+)
 from groundcheck.llm.base import LLMError, LLMRequest
 from groundcheck.llm.factory import PROVIDERS, make_provider
 from groundcheck.parsing.filing import DEFAULT_PARSED_DIR, load_parsed, parse_company
@@ -236,6 +246,60 @@ def cmd_llm_info(args: argparse.Namespace) -> int:
     return 0
 
 
+def _candidates(args: argparse.Namespace):
+    candidates = load_candidates(args.candidates_dir, args.company)
+    if not candidates:
+        where = f" for {', '.join(args.company)}" if args.company else ""
+        raise ConfigError(
+            f"no candidates{where} in {args.candidates_dir}; run scripts/generate_candidates.py"
+        )
+    return candidates
+
+
+def cmd_label(args: argparse.Namespace) -> int:
+    candidates = _candidates(args)
+    store = LabelStore(args.labels)
+    items = claim_items(candidates)
+    done = sum(store.get(i.claim.claim_id) is not None for i in items)
+    print(f"{len(items)} claim(s) in {len(candidates)} candidate(s); {done} already labeled.")
+    print("Paste evidence exactly as shown; finish a paste with an empty line. q quits.")
+    Labeler(store).run(items, only_unlabeled=args.only_unlabeled)
+    return 0
+
+
+def cmd_label_stats(args: argparse.Namespace) -> int:
+    store = LabelStore(args.labels)
+    candidates = load_candidates(args.candidates_dir, args.company)
+    records = [r for r in store.records.values() if not args.company or r.ticker in args.company]
+    print(label_stats(records, candidates))
+    return 0
+
+
+def cmd_label_check(args: argparse.Namespace) -> int:
+    records, problems = check_labels(args.labels, load_candidates(args.candidates_dir))
+    for problem in problems:
+        print(f"ERROR: {problem}")
+    status = "OK" if not problems else f"{len(problems)} problem(s)"
+    print(f"{len(records)} valid label record(s) in {args.labels}; {status}")
+    return 1 if problems else 0
+
+
+def cmd_export_labels(args: argparse.Namespace) -> int:
+    candidates = load_candidates(args.candidates_dir)
+    records, problems = check_labels(args.labels, candidates)
+    if problems:
+        for problem in problems:
+            print(f"ERROR: {problem}")
+        print("Nothing exported: fix these first (`groundcheck label-check`).")
+        return 1
+    n = export_labels(records, candidates, args.out)
+    print(
+        f"Exported {n} confirmed label(s) to {args.out}; "
+        f"{len(records) - n} unconfirmed label(s) left out."
+    )
+    return 0
+
+
 def add_llm_options(parser: argparse.ArgumentParser) -> None:
     """--llm-config, --provider, --model and --allow-paid, shared with the scripts."""
     parser.add_argument("--llm-config", type=Path, default=None, help="default: config/llm.yaml")
@@ -376,6 +440,41 @@ def build_parser() -> argparse.ArgumentParser:
         "--prompt", default="Reply with the single word: ready", help="'' to skip the test call"
     )
     llm_info.set_defaults(func=cmd_llm_info)
+
+    # Options shared by the labeling commands.
+    label_options = argparse.ArgumentParser(add_help=False)
+    label_options.add_argument("--candidates-dir", type=Path, default=DEFAULT_CANDIDATES_DIR)
+    label_options.add_argument("--labels", type=Path, default=DEFAULT_LABELS_PATH)
+
+    label = subparsers.add_parser(
+        "label", parents=[label_options], help="label claims interactively (autosaves)"
+    )
+    label.add_argument("--company", nargs="+", metavar="TICKER", help="limit to tickers")
+    label.add_argument(
+        "--only-unlabeled", action="store_true", help="skip claims that already have a label"
+    )
+    label.set_defaults(func=cmd_label)
+
+    stats = subparsers.add_parser(
+        "label-stats",
+        parents=[label_options],
+        help="label counts by label, company, question type and edge case",
+    )
+    stats.add_argument("--company", nargs="+", metavar="TICKER", help="limit to tickers")
+    stats.set_defaults(func=cmd_label_stats)
+
+    check = subparsers.add_parser(
+        "label-check", parents=[label_options], help="validate every label record"
+    )
+    check.set_defaults(func=cmd_label_check)
+
+    export = subparsers.add_parser(
+        "export-labels",
+        parents=[label_options],
+        help="write confirmed labels only, as clean JSONL under data/eval/",
+    )
+    export.add_argument("--out", type=Path, default=DEFAULT_EXPORT_PATH)
+    export.set_defaults(func=cmd_export_labels)
     return parser
 
 

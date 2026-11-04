@@ -709,3 +709,55 @@ script, same record format; the metadata says which runtime produced each answer
 *Why a second runtime:* the MacBook Air is slow and throttles; a T4 does a 60-question
 run in minutes. *Why not Ollama on Colab:* it needs a background server process in the
 notebook, which is fragile; `transformers` runs in-process.
+
+## Labeling (`labeling/`, `groundcheck label`, `label-stats`, `label-check`, `export-labels`), Day 10
+
+**What:** a pydantic `LabelRecord` per claim, a terminal labeler that saves after every
+claim, and three reporting commands. Labels live in `data/labels/labels.jsonl`
+(committed); the confirmed ones are exported to `data/eval/gold_labels.jsonl`.
+
+**The schema** (`labeling/schema.py`): `claim_id`, `candidate_id`, `question_id`,
+`ticker`, `qtype`, the claim text, `label` (`supported` / `contradicted` /
+`unsupported`), `evidence` (a list of spans), `edge_case` (one tag from
+docs/labeling_guide.md, or none), `confirmed`, a free-text `note`, and `labeled_at`.
+Rules enforced by validators:
+- supported and contradicted need at least one evidence span; unsupported has none
+  (absent evidence *is* the reason for unsupported, so there is nothing to cite);
+- `absent_evidence` only goes with unsupported;
+- an evidence span is `{chunk_id, text, start, end}`: the text is stored
+  whitespace-normalized, and `start`/`end` are offsets into the *normalized* chunk
+  text (PLAN.md: "evidence span offsets checked against the passage text"). With the
+  candidate's chunks passed as validation context, the validator checks the chunk is
+  one of the candidate's retrieved chunks and the text sits exactly at those offsets.
+*Why the same normalization as retrieval gold strings:* chunk text has table rows on
+separate lines and a pasted span spans them; collapsing whitespace on both sides makes
+a copy-paste match while keeping case, punctuation, `$`, `%` and `|` exact. *Why offsets
+as well as text:* a value like `$12,345` can appear twice in one chunk (MD&A table and
+prose); the offset records which occurrence the labeler meant.
+*Why a list of spans:* multi_step claims ("sales grew 6%") cite two numbers.
+
+**The labeler** (`labeling/session.py`): shows the question, answer, every retrieved
+chunk in full with its rank, ID, Item, kind and score, then the claim. Keys: `s`, `c`,
+`u`, `k` (skip, nothing saved), `q` (quit), Enter (keep an existing label). Evidence is
+pasted and ended with an empty line, because a pasted table row arrives as several
+lines; the span is looked up in the retrieved chunks, and if it occurs in more than one
+you choose which. Then an edge-case number (Enter for none), a note, and "Confirm? [Y/n]".
+Every label is written immediately: the whole file is rewritten to a `.part` file,
+fsynced and renamed, so quitting, Ctrl-D or a crash loses at most the claim on screen.
+`--only-unlabeled` shows only claims with no record, which is how you resume.
+`--company` limits to tickers. The labeler refuses to open a label file with invalid
+lines (saving would drop them). *Why plain `input()`:* PLAN.md says to cut the rich UI
+first; injected input/output functions also let tests script whole sessions.
+*Alternative:* Label Studio or Argilla. Both need a server and an export step, and
+neither knows the "evidence must be in a retrieved chunk" rule.
+
+**`label-check`** validates every line: JSON, schema, evidence against the candidate's
+chunks, that the claim exists in the candidates with the same text, and no duplicate
+claim IDs. It prints `line N (claim id): problem` and exits 1 on any problem.
+**`label-stats`** counts labels by label (all and confirmed only), company, question
+type and edge case, plus how many candidate claims are still unlabeled.
+**`export-labels`** runs the same checks and refuses to write anything if one fails;
+otherwise it writes only `confirmed=True` labels, sorted by claim ID, each with the
+question, answer, claim, label, evidence, edge case, note, the retrieved passages and
+the generating model, so the gold file is self-contained for verifier evaluation.
+Unconfirmed drafts are counted and left out (PLAN.md: no fabricated gold labels).
