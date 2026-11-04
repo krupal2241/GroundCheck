@@ -25,13 +25,18 @@ paid API call is refused unless you explicitly pass `--allow-paid`.
 
 Every number below stays **TBD** until a real run produces it. Nothing here is estimated.
 
-### Retrieval (baseline: fixed-size chunks, bge-small, FAISS)
+### Retrieval (fixed-size chunks, one FAISS index per company)
 
-| Metric | Value |
-|---|---|
-| recall@1 | TBD |
-| recall@5 | TBD |
-| recall@10 | TBD |
+On the 30 questions in `data/eval/retrieval_questions.yaml`. They were drafted by an AI
+from the filings and are not yet reviewed, so differences under about 0.1 are noise.
+
+| Variant | recall@1 | recall@5 | recall@10 |
+|---|---|---|---|
+| `dense` (bge-small, baseline) | 0.23 | 0.50 | 0.62 |
+| `bm25` (BM25 alone, diagnostic) | 0.33 | 0.62 | 0.65 |
+| other variants | TBD | TBD | TBD |
+
+Variants and how to compare them: [docs/DESIGN.md](docs/DESIGN.md), "Retrieval variants".
 
 ### Labeled test set
 
@@ -77,6 +82,9 @@ python3 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev,embed]"
 ```
 
+Add `rerank` (`pip install -e ".[dev,embed,rerank]"`) only to try the cross-encoder
+reranker variant; the default retriever doesn't need it.
+
 **2. Set your SEC user agent** (SEC's fair-access rules require a name and email):
 
 ```bash
@@ -117,7 +125,23 @@ groundcheck index
 
 `parse` ends with "Parsed 8 filing(s) ...; N warning(s)"; JPM and XOM show NOTE lines
 for their recovered Items 7 and 8. `index` downloads bge-small once and builds one
-FAISS index per company under `data/index/`.
+FAISS index per company for the default retrieval variant (`config/retrieval.yaml`),
+under `data/index/<embedding>/`.
+
+**Optional: compare retrieval variants** (dense, contextual headers, hybrid BM25,
+reranker, bge-base). Build every variant's index, then print one comparison table:
+
+```bash
+groundcheck index --variant all --only AAPL MSFT AMZN WMT XOM JNJ
+```
+
+```bash
+groundcheck eval-retrieval --compare
+```
+
+It also writes `data/eval/results/compare.json` and `compare.md` and prints the
+recommended default (best recall@5, or the fastest variant within 0.05 of it). To adopt
+it, set `default:` in `config/retrieval.yaml`, then run `groundcheck index` for it.
 
 **5. Write questions** in `data/questions/candidate_questions.yaml` (ten typed slots
 per labeled company) and/or `data/eval/retrieval_questions.yaml`. Questions with text

@@ -29,7 +29,8 @@ claim-level test set. No GPU, no fine-tuning, **$0 spend**.
 | JPM | Indexed and parsed (`role: unlabeled`); not in the labeled set |
 | Missing Item section | Logged as a WARNING (never silently skipped) |
 | Vector store | FAISS `IndexFlatIP` (exact cosine), **one index per company** |
-| Embeddings | `BAAI/bge-small-en-v1.5`, on CPU or Apple MPS |
+| Embeddings | `BAAI/bge-small-en-v1.5`, on CPU or Apple MPS (`bge-base-en-v1.5` selectable) |
+| Retrieval | Variants in `config/retrieval.yaml`: dense, contextual headers, hybrid BM25 + RRF, optional `bge-reranker-base`. Default `hybrid` (provisional until `eval-retrieval --compare` runs on the Mac) |
 | LLM | Ollama (local) first. No paid adapter in Weeks 1–2. |
 | Default model | `llama3.2:3b`: the MacBook Air M3 has 8 GB RAM, so a 3B model is what fits comfortably. |
 | Rounding rule | Supported only if the source value rounds correctly to the claim's own precision. Unit or scale mistakes count as **contradicted**. |

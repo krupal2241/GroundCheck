@@ -357,6 +357,11 @@ def test_committed_retrieval_config_is_valid():
     assert config.variants["dense-base"].embedder == "bge-base"
     assert config.pool == 30
     assert any(v.rerank == "bge-reranker-base" for v in config.variants.values())
+    # The default must be a real candidate and run with the default install ([embed]).
+    default = config.variants[config.default]
+    assert not default.diagnostic and default.rerank is None
+    assert default.embedder == "bge-small"
+    assert config.variants["bm25"].diagnostic
 
 
 def test_config_validation(tmp_path):

@@ -18,7 +18,12 @@
 # Memory on an 8 GB MacBook Air: bge-small ~130 MB, bge-base ~440 MB,
 # bge-reranker-base ~1.1 GB; any single variant fits comfortably next to Ollama.
 
-default: dense
+# The default is provisional until `groundcheck eval-retrieval --compare` runs on the Mac
+# (the sandbox cannot download the models). Rule: best recall@5, but the cheapest
+# variant within 0.05 of it. Measured so far, on the 30 AI-drafted questions: dense
+# (bge-small) recall@5 0.50, BM25 alone 0.62. hybrid keeps that lexical signal for
+# about 1 ms more per query and no extra model; see docs/DESIGN.md, "Retrieval variants".
+default: hybrid
 pool: 30
 rrf_k: 60
 

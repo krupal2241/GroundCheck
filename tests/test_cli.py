@@ -158,7 +158,7 @@ def test_index_and_retrieve_commands_with_fake_embedder(capsys, tmp_path):
     assert "hashing-256" in capsys.readouterr().out
     assert main(["retrieve", "EXCO", "What were total net sales?", "-k", "3", *common]) == 0
     header, *out = capsys.readouterr().out.splitlines()
-    assert header == "Variant dense: dense=hashing-256"
+    assert header == "Variant hybrid: dense=hashing-256 bm25 rrf_k=60 pool=30"  # the default
     assert len(out) == 3 and out[0].startswith(" 1. ")
     assert all("EXCO-" in line for line in out)
 

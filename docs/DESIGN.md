@@ -394,9 +394,10 @@ questions.
 `ticker`, `qtype`, `question`, `gold_evidence` (a list of exact strings copied from
 `data/parsed/<TICKER>.txt`), an optional `gold_items`, and `notes`. Unknown keys and
 unknown qtypes are rejected, so `gold_evidnce:` fails loudly. The committed template
-has 30 empty entries (5 per labeled company, one each of numeric_lookup, table,
-multi_step, yes_no and temporal). No gold text is pre-filled: gold labels only come
-from a human.
+has 30 entries (5 per labeled company, one each of numeric_lookup, table,
+multi_step, yes_no and temporal). They were first committed empty and later filled from
+the chunks by Claude at the project owner's request (see "Retrieval variants" for what
+that means for the numbers).
 
 **Metrics:**
 - *recall@k*: the fraction of a question's gold strings found in at least one top-k
@@ -788,3 +789,133 @@ labeling.
   is unsupported.
 - `contradicted` needs a span that makes the claim false; "can't find it" is
   `unsupported`.
+
+## Retrieval variants (`retrieval/retriever.py`, `variants.py`, `bm25.py`, `rerank.py`, `compare.py`), Day 11
+
+**Why:** the dense baseline (bge-small, chunk text only) scored recall@1 0.23, @3 0.40,
+@5 0.50, @10 0.62 and section-hit@5 0.83 on the Mac. It was weakest on multi_step
+(R@5 0.17), table (R@1 0.00) and AMZN (0.40 at every k). The goal is a higher recall@5
+**without changing chunk text**, so every gold string and labeled evidence span stays
+exact.
+
+**The `Retriever` interface:** `search(ticker, query, k) -> list[Hit]`, plus `variant`
+and `description`. `VariantRetriever` runs the stages a variant in
+`config/retrieval.yaml` turns on. `eval-retrieval`, `retrieve` and
+`scripts/generate_candidates.py` all open it the same way, so evaluation and generation
+can't drift apart.
+
+| Variant | Stages |
+|---|---|
+| `dense` | bge-small over the chunk text (the baseline) |
+| `dense-headers` | bge-small over header + chunk text |
+| `hybrid` | `dense` + BM25, merged by RRF |
+| `hybrid-headers` | `dense-headers` + BM25, merged by RRF |
+| `hybrid-headers-rerank` | `hybrid-headers`, then the top 30 reranked by `BAAI/bge-reranker-base` |
+| `dense-base` | `BAAI/bge-base-en-v1.5` instead of bge-small |
+| `hybrid-headers-base` | `hybrid-headers` with bge-base |
+| `bm25` | BM25 alone, no model (diagnostic: compared, never recommended) |
+
+**Contextual headers:** `AAPL FY2025 10-K | Item 7 Management's Discussion and Analysis ...
+| table`, then a newline and the chunk text. The fiscal year is the year of the period of
+report in `companies.yaml` (Walmart's year ending 2026-01-31 is FY2026, as Walmart names
+it). The header goes only into the string handed to the embedder (and to the reranker);
+`Chunk.text`, the chunks file and every `Hit` keep the stored text
+(`test_headers_never_modify_stored_chunk_text`). Queries get no header. It adds 15 to 30
+tokens (Item 5's title is the longest), and chunks are capped at 480 of bge's 512, so
+nothing new gets truncated (`index` still counts with headers and warns). *Why:* a table chunk like `Greater China | 64,377 | (4)%
+| ...` says nothing about which company, year or statement it comes from. The header gives
+the embedding that context. *Alternative:* an LLM-written summary per chunk ("contextual
+retrieval"). It costs a model call per chunk and adds non-determinism; a template header
+costs nothing.
+
+**BM25** is written here (`bm25.py`, about 60 lines, numpy only): Okapi BM25, `k1 = 1.5`,
+`b = 0.75`, Lucene's non-negative IDF. It uses the same tokenizer as the hashing
+embedder, which keeps `64,377` and `2025` as single tokens, plus a short stopword list
+for question words. It is built in memory from the chunks when a retriever opens (a few
+thousand chunks: well under a second). *Why not `rank-bm25`:* one more dependency for
+something this small, and its tokenization would be ours anyway. *Why BM25 at all:*
+10-K questions are full of exact terms that a small embedding model blurs: product
+names (DARZALEX), line items (Advertising services), numbers and years.
+
+**Fusion: reciprocal rank fusion**, `score = sum of 1 / (60 + rank)` over each
+ranking's top `pool` (30). Ties go to the better single rank. *Why RRF:* cosine scores
+and BM25 scores live on unrelated scales. RRF uses only ranks, so nothing needs
+calibrating, and `k = 60` is the value from the original paper (Cormack et al., 2009).
+*Alternative:* a weighted sum of normalized scores. It needs a weight tuned on the eval,
+and 30 questions are too few to tune anything.
+
+**Reranker:** `BAAI/bge-reranker-base` through sentence-transformers' `CrossEncoder`
+(`max_length` 512, batches of 8), over the first stage's top 30 (`pool`). It sees the
+same text as the embedder (with header if the variant has headers). It is in a new
+`[rerank]` extra and imported only when a rerank variant is opened, so CI and the
+default install never load it. *Cost:* 30 forward passes per query, the slowest stage
+by far, and about 1.1 GB of weights. That still fits on the 8 GB Air, but not
+comfortably next to a running Ollama, which is one more reason it isn't the default.
+
+**bge-base** (`embedder: bge-base`): 768 dimensions, about 440 MB, the same query
+instruction and 512-token limit as bge-small. Any variant can use it.
+
+**Indexes per embedding, checked per variant:** a dense index depends only on the model
+and the exact texts embedded. So indexes live in `data/index/<model>[+headers-h1]/<TICKER>/`,
+and `dense`, `hybrid` and `hybrid-headers` share folders instead of embedding the
+filings again. `meta.json` records the variant that built the index, its embedding key
+and the sha256 of the embedded texts. Opening a variant recomputes the texts it would
+embed and refuses an index whose key or texts differ (for example, if a header changed
+because `companies.yaml` changed), naming the variant that built it and the
+`groundcheck index --variant ...` command to run. BM25-only variants need no index.
+Indexes built before variants existed (`data/index/<TICKER>/`) are not found; re-run
+`groundcheck index`. *Alternative:* one folder per variant name. That is simpler to
+explain, but `--variant all` would embed every filing four extra times on a fanless
+laptop.
+
+**Comparison** (`eval-retrieval --compare`): opens every variant first (a missing index
+fails before anything runs; models are shared between variants that use the same one),
+runs one untimed warm-up query per company, then evaluates. It prints one table with
+recall@1/3/5/10, section-hit@1/3/5/10, MRR and mean latency per query (the wall time of
+`search`: query embedding, FAISS, BM25, fusion and reranking, not model loading). It
+writes `data/eval/results/compare.json`, `compare.md` (adding recall@5 by question type
+and by company) and `retrieval_<variant>.json` per variant. *MRR* uses the rank of the
+first chunk containing any gold string, and 0 if none is in the top 10.
+
+**Choosing the default:** the variant with the best recall@5, except that among
+variants within 0.05 of the best, the one with the lowest latency wins
+(`variants.recommend_default`, printed by `--compare`). Diagnostic variants are never
+recommended.
+
+### Results so far
+
+**Read these with care: the eval has only 30 questions, and they were drafted by an AI
+(Claude) from the filings, not yet reviewed by a human.** One question moves recall by
+0.033, so **differences under about 0.1 are noise**. There is also a known bias. The
+questions were written from the gold text, and while they avoid copying its wording,
+they share its entity names and numbers, which favors exact-term matching (BM25) over
+paraphrase matching.
+
+| Variant | R@1 | R@3 | R@5 | R@10 | S@5 | MRR | ms/query | Where measured |
+|---|---:|---:|---:|---:|---:|---:|---:|---|
+| `dense` | 0.23 | 0.40 | 0.50 | 0.62 | 0.83 | TBD | TBD | Mac (before this change) |
+| `bm25` | 0.33 | 0.52 | 0.62 | 0.65 | 1.00 | 0.45 | 0.4 | sandbox (pure Python, so the same on the Mac) |
+| `dense-headers`, `hybrid`, `hybrid-headers`, `hybrid-headers-rerank`, `dense-base`, `hybrid-headers-base` | TBD | | | | | | | needs the models: run `--compare` on the Mac |
+
+BM25 alone, recall@5 by type: multi_step 0.58, numeric_lookup 0.67, table 0.33,
+temporal 0.83, yes_no 0.67. By company: AAPL 0.80, AMZN 0.40, JNJ 0.80, MSFT 0.20,
+WMT 0.90, XOM 0.60. It misses mostly where the question paraphrases (MSFT-01 "contracted
+commercial backlog" for "remaining performance obligation", AMZN-02 "selling ads"), which
+is where the dense stage should help. The sandbox can't download the models, so the
+dense variants are measured only on the Mac. The sandbox ran every variant end to end
+with the offline fakes (hashing embedder, overlap reranker) to check the plumbing; those
+numbers mean nothing about the real models and are not reported.
+
+**Default: `hybrid` (provisional).** With only two variants measured, the rule can't be
+applied to the full set yet. BM25 alone beats dense by 0.12 recall@5, just above the
+noise level. That says exact terms matter on this eval. `bm25` itself is excluded from
+default candidacy: the eval's lexical bias flatters it, and a retriever with no semantic
+stage is a risk for real, paraphrased questions. `hybrid` adds BM25 to the dense stage at
+about 1 ms per query, with no extra model, memory or install. That puts it in the same
+cost class as `dense`, so the cheaper-within-0.05 preference doesn't separate them. Its
+recall is **expected, not measured**, to be at least close to the better of its two
+parts. Rerank and bge-base variants cost more (a second model, 30 cross-encoder passes
+per query, or 3x the embedding cost), so they must beat `hybrid` by more than 0.05
+recall@5 to take over. When `--compare` runs on the Mac, its printed recommendation
+replaces this one: change `default:` in `config/retrieval.yaml`, run `groundcheck index`,
+and update this table from `data/eval/results/compare.md`.
