@@ -62,6 +62,14 @@ class Inputs:
     problems: list[str] = field(default_factory=list)
 
 
+def _show(path: Path) -> str:
+    """A path as written in reports: relative to the repo when inside it (no home dirs)."""
+    try:
+        return str(Path(path).resolve().relative_to(REPO_ROOT))
+    except ValueError:
+        return str(path)
+
+
 def _pct(x: float | None) -> str:
     return "n/a" if x is None else f"{100 * x:.1f}%"
 
@@ -82,17 +90,17 @@ def load_inputs(
         try:
             results = EvalResults.model_validate_json(path.read_text())
         except ValidationError as exc:
-            inputs.problems.append(f"{path} is not a valid verifier_eval.json: {exc}")
+            inputs.problems.append(f"{_show(path)} is not a valid verifier_eval.json: {exc}")
         else:
             if results.verifiers:
                 inputs.verifier, inputs.verifier_path = results, path
             else:
                 inputs.missing.append(
-                    f"{path} has no verifier entries: run groundcheck eval-verifiers"
+                    f"{_show(path)} has no verifier entries: run groundcheck eval-verifiers"
                 )
     else:
         inputs.missing.append(
-            f"verifier results ({path}): run `groundcheck eval-verifiers --verifier ...` "
+            f"verifier results ({_show(path)}): run `groundcheck eval-verifiers --verifier ...` "
             "after `groundcheck export-labels`"
         )
     if results_dir.is_dir():
@@ -103,10 +111,10 @@ def load_inputs(
         try:
             inputs.retrieval[p.name] = RetrievalReport.model_validate_json(p.read_text())
         except ValidationError:
-            inputs.problems.append(f"{p} is not a retrieval report; skipped")
+            inputs.problems.append(f"{_show(p)} is not a retrieval report; skipped")
     if not inputs.retrieval:
         inputs.missing.append(
-            f"retrieval results ({retrieval_dir}/*.json): run `groundcheck eval-retrieval`"
+            f"retrieval results ({_show(retrieval_dir)}/*.json): run `groundcheck eval-retrieval`"
         )
     if labels_path is not None:
         inputs.balance = class_balance(labels_path, candidates_dir)
