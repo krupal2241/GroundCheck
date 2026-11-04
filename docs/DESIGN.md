@@ -1062,3 +1062,21 @@ gold claim and candidate chunk all excluded; splits by company; partners in the 
 split; byte-identical output on a re-run), each perturbation rule, and the training
 script and `FineTunedVerifier` over stand-in `transformers` (seeds, Trainer settings,
 id2label, pair order, metrics file, model card, aggregation).
+
+## Error report (`verify/errors.py`, `groundcheck error-report`), Part 4
+
+**What:** `groundcheck error-report` writes `results/error_report.md`: for each verifier
+with predictions (or those named with `--verifier`), a table of claims, errors and error
+rate per edge-case tag, the gold -> predicted confusions by frequency, then every
+misclassified claim grouped by tag: claim ID, gold and predicted label, score, the claim,
+the gold evidence span(s) with their chunk IDs (or "none" for a gold-unsupported claim),
+the span the verifier cited, the labeler's note, company and question type. Prompted
+verifier failures are called out: no parseable JSON, or a quote that is in no passage.
+
+**Why it reads the saved predictions instead of re-running models:** the report then
+explains exactly the run whose numbers are in `verifier_eval.md`, costs nothing, and
+can be regenerated after editing a note. It checks the gold file's sha256 against the
+one stored by `eval-verifiers` and warns if the gold set changed since. Untagged claims
+(`(none)`) come last so the edge cases are read first. *Why Markdown:* it is for reading
+and pasting into notes or an issue; the JSON predictions remain the machine-readable form.
+Spans are shown as double-backtick inline code, so table pipes and dollar signs survive.

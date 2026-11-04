@@ -70,6 +70,7 @@ class GoldRecord(BaseModel):
     label: Label
     evidence: list[EvidenceSpan] = []
     edge_case: EdgeCase | None = None
+    note: str = ""
     passages: list[GoldPassage]
 
     @property

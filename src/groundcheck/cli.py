@@ -66,6 +66,7 @@ from groundcheck.training.data import (
 )
 from groundcheck.verify.base import VerifierError
 from groundcheck.verify.costs import DEFAULT_PRICES_PATH, load_prices
+from groundcheck.verify.errors import error_report
 from groundcheck.verify.evaluate import DEFAULT_RESULTS_DIR, evaluate_verifiers, load_gold
 from groundcheck.verify.factory import VERIFIER_NAMES, VerifierOptions, make_verifier
 
@@ -351,6 +352,16 @@ def cmd_eval_verifiers(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_error_report(args: argparse.Namespace) -> int:
+    gold = load_gold(args.gold)
+    text = error_report(args.results_dir, gold, args.gold, args.verifier)
+    out = args.out or args.results_dir / "error_report.md"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(text)
+    print(f"Wrote {out}")
+    return 0
+
+
 def cmd_build_training_data(args: argparse.Namespace) -> int:
     config = load_training_config(args.training_config)
     gold_paths = [args.gold, args.labels]
@@ -608,6 +619,20 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_verifier_options(eval_verifiers)
     eval_verifiers.set_defaults(func=cmd_eval_verifiers)
+
+    errors = subparsers.add_parser(
+        "error-report",
+        help="misclassified claims per verifier, by edge-case tag (results/error_report.md)",
+    )
+    errors.add_argument(
+        "--verifier", nargs="+", default=None, help="default: every verifier with predictions"
+    )
+    errors.add_argument("--gold", type=Path, default=DEFAULT_EXPORT_PATH)
+    errors.add_argument("--results-dir", type=Path, default=DEFAULT_RESULTS_DIR)
+    errors.add_argument(
+        "--out", type=Path, default=None, help="default: <results-dir>/error_report.md"
+    )
+    errors.set_defaults(func=cmd_error_report)
 
     training = subparsers.add_parser(
         "build-training-data",
