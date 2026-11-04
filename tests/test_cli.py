@@ -199,8 +199,8 @@ def test_eval_retrieval_check_reports_typos(capsys, tmp_path):
 
 
 def test_eval_retrieval_on_empty_template(capsys, tmp_path):
-    from groundcheck.retrieval.evaluate import DEFAULT_QUESTIONS_PATH
-
-    args = ["eval-retrieval", "--questions", str(DEFAULT_QUESTIONS_PATH)]
+    questions = tmp_path / "retrieval_questions.yaml"
+    questions.write_text("version: 1\nquestions:\n  - {id: A-01, ticker: AAPL, qtype: table}\n")
+    args = ["eval-retrieval", "--questions", str(questions)]
     assert main([*args, "--chunks-dir", str(tmp_path), "--embedder", "hashing"]) == 1
     assert "Nothing to evaluate yet" in capsys.readouterr().out
