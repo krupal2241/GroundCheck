@@ -58,6 +58,17 @@ from groundcheck.retrieval.evaluate import (
     load_questions,
 )
 from groundcheck.retrieval.index import DEFAULT_INDEX_DIR, CompanyIndex, build_company_index
+from groundcheck.training.data import (
+    DEFAULT_TRAINING_CONFIG,
+    DEFAULT_TRAINING_DIR,
+    build_training_data,
+    load_training_config,
+)
+from groundcheck.verify.base import VerifierError
+from groundcheck.verify.costs import DEFAULT_PRICES_PATH, load_prices
+from groundcheck.verify.errors import error_report
+from groundcheck.verify.evaluate import DEFAULT_RESULTS_DIR, evaluate_verifiers, load_gold
+from groundcheck.verify.factory import VERIFIER_NAMES, VerifierOptions, make_verifier
 
 
 def cmd_resolve_filings(args: argparse.Namespace) -> int:
@@ -300,6 +311,174 @@ def cmd_export_labels(args: argparse.Namespace) -> int:
     return 0
 
 
+def verifier_options(args: argparse.Namespace) -> VerifierOptions:
+    return VerifierOptions(
+        llm_config=args.llm_config,
+        provider=args.provider,
+        llm_model=args.model,
+        allow_paid=args.allow_paid,
+        use_cache=args.use_cache,
+        model=args.hf_model,
+        revision=args.revision,
+        device=args.device,
+        threshold=args.threshold,
+        finetuned_path=args.finetuned_path,
+    )
+
+
+def cmd_eval_verifiers(args: argparse.Namespace) -> int:
+    gold = load_gold(args.gold)
+    if args.company:
+        gold = [g for g in gold if g.ticker in args.company]
+    if args.limit is not None:
+        gold = gold[: args.limit]
+    if not gold:
+        raise ConfigError("no gold labels left after --company/--limit")
+    if args.hf_model and len(args.verifier) > 1:
+        raise ConfigError("--hf-model applies to one verifier; run them one at a time")
+    options = verifier_options(args)
+    prices = load_prices(args.prices)
+    print(f"{len(gold)} gold claim(s) from {args.gold}")
+    evaluate_verifiers(
+        args.verifier,
+        lambda name: make_verifier(name, options),
+        gold,
+        args.gold,
+        args.results_dir,
+        prices,
+    )
+    print(f"Wrote {args.results_dir / 'verifier_eval.json'} and verifier_eval.md")
+    print(f"Per-claim predictions: {args.results_dir / 'predictions'}/")
+    return 0
+
+
+def cmd_error_report(args: argparse.Namespace) -> int:
+    gold = load_gold(args.gold)
+    text = error_report(args.results_dir, gold, args.gold, args.verifier)
+    out = args.out or args.results_dir / "error_report.md"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(text)
+    print(f"Wrote {out}")
+    return 0
+
+
+DEMO_VERIFIERS = ["prompted", "hhem", "minicheck", "fake"]
+
+
+def cmd_demo(args: argparse.Namespace) -> int:
+    from groundcheck.demo.app import DemoPipeline, build_app
+    from groundcheck.generation.pipeline import RetrievalInfo
+    from groundcheck.generation.prompts import fake_responder
+    from groundcheck.retrieval.index import file_sha256
+
+    companies = load_companies(args.config)
+    tickers = args.company or [
+        c.ticker for c in companies.companies if (args.index_dir / c.ticker / "meta.json").is_file()
+    ]
+    if not tickers:
+        raise ConfigError(f"no company has an index in {args.index_dir}; run `groundcheck index`")
+    verifiers = args.verifiers or (["fake"] if args.dry_run else list(DEMO_VERIFIERS))
+    if args.finetuned_path and "finetuned" not in verifiers:
+        verifiers.append("finetuned")
+    llm_config = load_llm_config(args.llm_config)
+    if args.dry_run:
+        provider = make_provider(llm_config, "fake", use_cache=False, responder=fake_responder)
+    else:
+        provider = make_provider(llm_config, args.provider, args.model, allow_paid=args.allow_paid)
+    embedder = make_embedder(args.embedder, args.device)
+    indexes: dict[str, CompanyIndex] = {}
+
+    def index(ticker: str) -> CompanyIndex:
+        if ticker not in indexes:
+            indexes[ticker] = CompanyIndex.load(ticker, args.chunks_dir, args.index_dir)
+        return indexes[ticker]
+
+    def retrieve(ticker: str, question: str, k: int):
+        return index(ticker).search(embedder, question, k)
+
+    def retrieval_info(ticker: str) -> RetrievalInfo:
+        return RetrievalInfo(
+            embedder=embedder.name,
+            chunker=index(ticker).chunks[0].chunker,
+            top_k=llm_config.top_k,
+            chunks_sha256=file_sha256(chunks_path(ticker, args.chunks_dir)),
+        )
+
+    options = verifier_options(args)
+    if args.dry_run:
+        options.provider = "fake"
+    pipeline = DemoPipeline(
+        provider, retrieve, retrieval_info, llm_config, lambda n: make_verifier(n, options)
+    )
+    app = build_app(pipeline, tickers, verifiers)
+    identity = provider.identity()
+    print(
+        f"GroundCheck demo: {identity.provider} {identity.model}, embedder {embedder.name}, "
+        f"companies {', '.join(tickers)}, verifiers {', '.join(verifiers)}"
+    )
+    print(f"Open http://{args.host}:{args.port} (Ctrl-C to stop)")
+    app.launch(server_name=args.host, server_port=args.port, share=False)
+    return 0
+
+
+def cmd_build_training_data(args: argparse.Namespace) -> int:
+    config = load_training_config(args.training_config)
+    gold_paths = [args.gold, args.labels]
+    manifest = build_training_data(
+        args.chunks_dir, args.out_dir, config, gold_paths, args.candidates_dir
+    )
+    for problem in manifest["companies_in_config_without_chunks"]:
+        print(f"WARNING: {problem} is in {args.training_config or 'config/training.yaml'} "
+              "but has no chunks")  # fmt: skip
+    if not (manifest["gold_claims_excluded"] or manifest["candidate_chunks_excluded"]):
+        print(
+            "WARNING: found no gold labels, label file or candidates to exclude. That is "
+            "only right if nothing has been labeled yet; otherwise check --gold, --labels "
+            "and --candidates-dir before training."
+        )
+    print(
+        f"Excluded {manifest['gold_claims_excluded']} gold claim(s), "
+        f"{manifest['gold_chunks_excluded']} gold chunk(s) and "
+        f"{manifest['candidate_chunks_excluded']} other candidate chunk(s)."
+    )
+    for split, counts in manifest["counts_by_split_and_label"].items():
+        total = sum(counts.values())
+        detail = ", ".join(f"{k} {v}" for k, v in sorted(counts.items()))
+        print(f"  {split:<5} {total:>6} example(s)  {detail}")
+    print(f"By rule: {manifest['counts_by_rule']}")
+    print(f"Wrote {args.out_dir}/{{train,dev,test}}.jsonl and manifest.json")
+    return 0
+
+
+def add_verifier_options(parser: argparse.ArgumentParser) -> None:
+    """Options for building verifiers (and the prompted verifier's LLM)."""
+    add_llm_options(parser)
+    parser.add_argument(
+        "--use-cache",
+        action="store_true",
+        help="prompted: reuse cached LLM replies (off by default: latency would be meaningless)",
+    )
+    parser.add_argument(
+        "--hf-model", default=None, help="minicheck/hhem: a different Hugging Face model ID"
+    )
+    parser.add_argument("--revision", default=None, help="minicheck/hhem: pin a Hub commit")
+    parser.add_argument(
+        "--device", default=None, help="cpu, mps or cuda (default: cuda, else mps, else cpu)"
+    )
+    parser.add_argument(
+        "--threshold",
+        type=float,
+        default=0.5,
+        help="binary verifiers: P(supported) needed to say supported (default 0.5)",
+    )
+    parser.add_argument(
+        "--finetuned-path",
+        type=Path,
+        default=None,
+        help="finetuned: the model directory written by scripts/train_verifier.py",
+    )
+
+
 def add_llm_options(parser: argparse.ArgumentParser) -> None:
     """--llm-config, --provider, --model and --allow-paid, shared with the scripts."""
     parser.add_argument("--llm-config", type=Path, default=None, help="default: config/llm.yaml")
@@ -475,6 +654,101 @@ def build_parser() -> argparse.ArgumentParser:
     )
     export.add_argument("--out", type=Path, default=DEFAULT_EXPORT_PATH)
     export.set_defaults(func=cmd_export_labels)
+
+    eval_verifiers = subparsers.add_parser(
+        "eval-verifiers",
+        help="run verifiers over the confirmed gold labels; write results/verifier_eval.*",
+    )
+    eval_verifiers.add_argument(
+        "--verifier",
+        nargs="+",
+        required=True,
+        choices=VERIFIER_NAMES,
+        help="one or more verifiers, run one after another",
+    )
+    eval_verifiers.add_argument("--gold", type=Path, default=DEFAULT_EXPORT_PATH)
+    eval_verifiers.add_argument("--company", nargs="+", metavar="TICKER", help="limit to tickers")
+    eval_verifiers.add_argument("--limit", type=int, default=None, help="first N claims only")
+    eval_verifiers.add_argument("--results-dir", type=Path, default=DEFAULT_RESULTS_DIR)
+    eval_verifiers.add_argument(
+        "--prices",
+        type=Path,
+        default=None,
+        help=f"hosted prices for the cost ESTIMATE (default {DEFAULT_PRICES_PATH.name})",
+    )
+    add_verifier_options(eval_verifiers)
+    eval_verifiers.set_defaults(func=cmd_eval_verifiers)
+
+    errors = subparsers.add_parser(
+        "error-report",
+        help="misclassified claims per verifier, by edge-case tag (results/error_report.md)",
+    )
+    errors.add_argument(
+        "--verifier", nargs="+", default=None, help="default: every verifier with predictions"
+    )
+    errors.add_argument("--gold", type=Path, default=DEFAULT_EXPORT_PATH)
+    errors.add_argument("--results-dir", type=Path, default=DEFAULT_RESULTS_DIR)
+    errors.add_argument(
+        "--out", type=Path, default=None, help="default: <results-dir>/error_report.md"
+    )
+    errors.set_defaults(func=cmd_error_report)
+
+    demo = subparsers.add_parser(
+        "demo",
+        help="local Gradio demo: ask, retrieve, answer, verify each claim ([demo] extra)",
+    )
+    demo.add_argument("--config", type=Path, default=DEFAULT_COMPANIES_PATH)
+    demo.add_argument("--chunks-dir", type=Path, default=DEFAULT_CHUNKS_DIR)
+    demo.add_argument("--index-dir", type=Path, default=DEFAULT_INDEX_DIR)
+    demo.add_argument(
+        "--embedder", choices=["bge-small", "hashing"], default="bge-small",
+        help="must match the one the indexes were built with",
+    )  # fmt: skip
+    demo.add_argument(
+        "--company", nargs="+", metavar="TICKER", help="default: every company with an index"
+    )
+    demo.add_argument(
+        "--verifiers",
+        nargs="+",
+        choices=VERIFIER_NAMES,
+        default=None,
+        help=f"verifiers to offer (default: {' '.join(DEMO_VERIFIERS)}; fake with --dry-run)",
+    )
+    demo.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="fake LLM (answers with the top passage's first sentence); no Ollama needed",
+    )
+    demo.add_argument("--host", default="127.0.0.1")
+    demo.add_argument("--port", type=int, default=7860)
+    add_verifier_options(demo)
+    demo.set_defaults(func=cmd_demo)
+
+    training = subparsers.add_parser(
+        "build-training-data",
+        help="synthetic verifier training data from chunks (gold set excluded, split by company)",
+    )
+    training.add_argument("--chunks-dir", type=Path, default=DEFAULT_CHUNKS_DIR)
+    training.add_argument("--out-dir", type=Path, default=DEFAULT_TRAINING_DIR)
+    training.add_argument(
+        "--training-config",
+        type=Path,
+        default=None,
+        help=f"splits and sizes (default {DEFAULT_TRAINING_CONFIG.name})",
+    )
+    training.add_argument(
+        "--gold", type=Path, default=DEFAULT_EXPORT_PATH, help="gold labels to exclude"
+    )
+    training.add_argument(
+        "--labels", type=Path, default=DEFAULT_LABELS_PATH, help="label file to exclude too"
+    )
+    training.add_argument(
+        "--candidates-dir",
+        type=Path,
+        default=DEFAULT_CANDIDATES_DIR,
+        help="every chunk retrieved for a candidate is excluded as well",
+    )
+    training.set_defaults(func=cmd_build_training_data)
     return parser
 
 
@@ -490,7 +764,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     try:
         return args.func(args)
-    except (ConfigError, SecRequestError, LLMError) as exc:
+    except (ConfigError, SecRequestError, LLMError, VerifierError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 

@@ -788,3 +788,342 @@ labeling.
   is unsupported.
 - `contradicted` needs a span that makes the claim false; "can't find it" is
   `unsupported`.
+
+## Verifier work, Part 0: tests never import heavy ML packages (`tests/conftest.py`)
+
+**The bug:** `test_hf_local_without_extra_is_a_clean_error` blocked `transformers` with
+`sys.modules["transformers"] = None`, but `HFLocalProvider` imports `torch` first, so
+the test imported the real torch whenever it was installed. On a Mac with the `[embed]`
+extra, faiss and torch each bring their own OpenMP runtime; loading the second one into
+the same process can abort it (`OMP: Error #15`), which kills pytest outright instead
+of failing one test. The test now sets both `torch` and `transformers` to `None`.
+
+**The guard:** `conftest.py` puts a `MetaPathFinder` at the front of `sys.meta_path`
+that refuses `torch`, `transformers`, `sentence_transformers`, `accelerate`, `datasets`,
+`sklearn` and `gradio`. It raises `ModuleNotFoundError` (so a library's optional probe
+behaves as on CI, where none is installed) and records the attempt; an autouse fixture
+fails the test that made it, even when the error was caught by an `except ImportError`.
+The fixture also fails if a real copy (a module with a `__file__`) is already in
+`sys.modules`. Stand-ins and `None` entries in `sys.modules` are resolved before any
+finder is asked, so the two sanctioned patterns keep working: a fake module for the
+happy path, `None` for "extra not installed". *Why not just a lint rule:* the import that
+broke happened inside the package code under test, not in the test file.
+*Alternative:* `pytest --forked` or `KMP_DUPLICATE_LIB_OK=TRUE`; the first hides the
+crash in a child process, the second is Intel's own "may cause incorrect results" switch.
+
+## Verifiers (`verify/`), Part 1
+
+**What:** one interface, `Verifier`, and five implementations behind
+`verify.factory.make_verifier(name, VerifierOptions)`: `fake`, `prompted`, `minicheck`,
+`hhem` and (Part 3) `finetuned`. A verifier takes **a claim plus its evidence chunks**
+(`EvidenceChunk(chunk_id, text)`; for the gold set these are the passages retrieved for
+the question, because the labeling guide judges only against them) and returns a
+`Verification`:
+
+| Field | Meaning |
+|---|---|
+| `label` | `supported` / `contradicted` / `unsupported`, the gold vocabulary |
+| `score` | the verifier's estimate that the claim is **supported**, in [0, 1] |
+| `evidence` | an `EvidenceSpan` (chunk ID, normalized text, offsets), or None |
+| `latency_ms` | wall time of the whole `verify` call, measured by `BaseVerifier` |
+| `scores`, `details` | per-label probabilities if the model has them; model-specific extras |
+
+*Why `score` always means P(supported):* it is the one quantity every verifier can
+produce, so binary and three-way verifiers can share a threshold sweep or ROC curve.
+*Why the gold `EvidenceSpan` type:* a predicted span can be compared with the gold span
+directly (same normalization, same offsets). *Why latency in `BaseVerifier`:* the
+timer wraps the same code path for every verifier, including the evidence lookup.
+An empty chunk list returns `unsupported` without calling the model.
+
+**Evidence spans for cross-encoders** (`verify/spans.py`): MiniCheck, HHEM and the
+fine-tuned model say which chunk backs the claim, not which sentence. After the model
+has picked the chunk, the chunk is cut into units (each table row; sentences inside
+prose lines) and the unit covering most of the claim's words is cited, with numbers
+weighted 3x. It is a lexical choice made after the verdict and never changes the label.
+
+**How each model's native output becomes label + score:**
+
+| Verifier | Native output | `score` | `label` |
+|---|---|---|---|
+| `prompted` | JSON `{label, passage, evidence, confidence}` from the LLM | `confidence` if supported, else `1 - confidence` | as the LLM says |
+| `minicheck` | softmax over 2 classes per (chunk, claim); class 1 = supported | max P(supported) over chunks | supported if score >= 0.5, else **unsupported** |
+| `hhem` | consistency score in [0, 1] per (premise = chunk, hypothesis = claim) | max over chunks | supported if score >= 0.5, else **unsupported** |
+| `finetuned` | softmax over the 3 labels per (chunk, claim) | max P(supported) over chunks | see Part 3 |
+| `fake` | lexical rule (no model) | coverage-based | supported / contradicted / unsupported |
+
+**Contradicted and the binary models (MiniCheck, HHEM):** they never predict
+`contradicted`. Their single number means "this evidence backs the claim" vs "it does
+not"; a wrong number and a missing topic both land in "does not", and neither model was
+trained to separate them. Turning a very low score into `contradicted` would invent a
+distinction the model doesn't make, so every not-supported verdict is `unsupported`. The
+consequence is stated in every report: on the three-way metrics their contradicted recall
+is 0 by construction, and their gold-contradicted claims count as errors when predicted
+`unsupported`. To compare them fairly, `eval-verifiers` (Part 2) also reports a
+**binary view** (supported vs not supported) for every verifier. The threshold (0.5,
+`--threshold`) is the models' own decision boundary; it is not tuned on the gold set,
+which would leak the test labels into the verifier.
+
+**Aggregating over chunks:** each claim is scored against every retrieved chunk
+separately in one batch, then the maximum support wins. That is what MiniCheck does
+with long documents, it keeps every input under 512 tokens (chunks are built for
+bge-small's 512), and it matches the guide: one passage stating the claim is enough.
+*Limitation:* a multi_step claim whose two numbers sit in different chunks can't be
+supported by any single chunk. Concatenating the top chunks would exceed 512 tokens;
+the error report (Part 4) will show how often this happens.
+
+**`PromptedLLMVerifier`** (`verify/prompted.py`, prompt version `verify-v1`): goes
+through `make_provider`, so the paid guard applies and Ollama's deterministic settings
+(temperature 0, seed 42) are reused. The prompt is the labeling guide's rules in short
+form plus three worked examples, one per label (a table with correct rounding, a
+direction contradiction, a risk-factor statement that is unsupported), then the
+numbered passages and the claim. JSON is validated and retried with the error appended
+(`generate_structured`, up to 3 attempts). The quoted evidence is looked up in the cited
+passage, then in all of them; a quote that appears nowhere gives no span and
+`quote_found: false`, so a made-up quote is visible instead of trusted. If no attempt
+parses, the verdict is `unsupported` with `parse_error` in `details`, and the evaluator
+counts these. The disk cache is **off** by default for verification, because a cache
+hit has no meaningful latency. *Why a 3B local model at all:* it's the $0 stand-in for
+the "prompted frontier judge" row in the README; a hosted judge is only ever estimated
+(Part 2), never called.
+
+**`MiniCheckVerifier`** (`verify/hf.py`): default `lytang/MiniCheck-DeBERTa-v3-Large`
+(`lytang/MiniCheck-RoBERTa-Large` also works), loaded as a plain
+`AutoModelForSequenceClassification`; input (chunk, claim) with `truncation="only_first"`
+at 512 tokens, so a long chunk is cut rather than the claim. The class index for
+"supported" is read from `id2label` when the labels are named, else index 1 (the
+generic `LABEL_1`). The Flan-T5 and 7B MiniCheck variants need the `minicheck` package
+and a generative head, so they are refused with a pointer to the supported ones.
+*Why DeBERTa-Large:* the best of the MiniCheck checkpoints that load with plain
+`transformers` (no extra package from git), and it fits an 8 GB Mac.
+
+**`HHEMVerifier`**: Vectara's HHEM-2.1-Open (`vectara/hallucination_evaluation_model`,
+a Flan-T5-base classifier), through its own `predict([(premise, hypothesis)])`. The
+checkpoint ships custom modeling code, so it needs `trust_remote_code=True`; `--revision`
+pins the Hub commit (whose code you can read first), and the loaded commit is
+recorded in `identity()` either way.
+
+**Device:** `pick_device` picks CUDA (Colab), else Apple MPS, else CPU; `--device`
+overrides. `torch` and `transformers` live in the new `[verifiers]` extra (plus
+`sentencepiece` and `protobuf` for the DeBERTa-v3 and T5 tokenizers) and are imported
+only when a verifier is built; a missing extra is a one-line error saying what to install.
+
+**`FakeVerifier`**: a lexical rule (coverage of the claim's words and numbers in the best
+unit; a well-covered claim with a different number is `contradicted`), or scripted
+labels for tests. It is what dry runs and the offline demo use, and it doubles as a
+trivial baseline.
+
+**Tests** run the real `MiniCheckVerifier`/`HHEMVerifier` code over stand-in `torch` and
+`transformers` modules (`tests/hf_standins.py`, numpy-backed tensors and a lexical
+"model"): which model and kwargs are loaded, the (chunk, claim) order, truncation,
+device choice, the threshold, and that a binary model never says contradicted.
+*What they can't check:* the real checkpoints' label order and score quality; those are
+listed for verification on the Mac.
+
+## Verifier evaluation (`verify/evaluate.py`, `verify/costs.py`, `groundcheck eval-verifiers`), Part 2
+
+**What:** `groundcheck eval-verifiers --verifier fake prompted minicheck hhem finetuned`
+runs each chosen verifier over `data/eval/gold_labels.jsonl` (the confirmed labels from
+`export-labels`), checking every claim against exactly the passages stored with it, and
+writes:
+
+- `results/verifier_eval.json`: every metric below, one entry per verifier;
+- `results/verifier_eval.md`: a README-ready summary table, the hosted-cost estimate,
+  and per-verifier detail (per-class table, confusion matrix, breakdowns);
+- `results/predictions/<verifier>.jsonl`: one line per claim (gold, predicted, score,
+  cited span, latency), the input to `error-report` (Part 4).
+
+**Metrics:** accuracy; macro-F1 over the labels present in gold or predictions
+(scikit-learn's default set; a gold label never predicted contributes F1 = 0, so a
+verifier can't hide a class by never predicting it); per-class precision, recall, F1,
+gold count and predicted count (precision is `n/a`, not 0, for a label the verifier
+never predicts); the confusion matrix with gold rows and predicted columns; the
+**binary view** (supported vs contradicted+unsupported: accuracy, precision, recall, F1
+of "supported"), which is the fair comparison for MiniCheck and HHEM; accuracy by
+edge-case tag (`(none)` for untagged) and by company; **evidence agreement**, the
+share of correct supported/contradicted verdicts whose cited span overlaps a gold span
+in the same chunk; and the number of prompted-verifier parse failures. All metric code
+is plain Python and numpy (no scikit-learn), so CI tests it directly.
+
+**Latency and throughput:** latency is the per-claim wall time measured inside
+`BaseVerifier.verify` (all of a claim's passages, including span lookup); p50 and p95
+use numpy's linear-interpolation percentile. Throughput is claims divided by the wall
+time of the whole loop. Model loading is outside both. The prompted verifier runs with
+the LLM cache off unless `--use-cache` is passed, since a cache hit takes ~0 ms.
+Verifiers run one after another, each freed before the next is built, so an 8 GB Mac
+holds one model at a time.
+
+**Merging runs:** a run updates the entries of the verifiers it ran and keeps the rest,
+so `--verifier hhem` today and `--verifier minicheck` tomorrow end up in one table.
+Each entry stores the gold file's sha256; if entries disagree, the Markdown prints a
+warning above the table. `--company` and `--limit` are for smoke tests; a limited run
+also overwrites that verifier's entry, so re-run in full before copying numbers.
+
+**Cost per 1,000 checks:** every built-in verifier runs locally, so the table says
+"$0 (local)". The hosted-model row is an **estimate only**: `config/prices.yaml` is an
+empty template you fill in with prices per million tokens; nothing in it is ever
+called. Estimated cost = 1,000 x (input tokens x input price + output tokens x output
+price) / 1,000,000, where input tokens are the prompted verifier's real prompt
+(system, rules, few-shot examples, the claim's passages and the claim) per gold claim,
+counted as characters / 4, and output tokens are measured from the local prompted run
+if it ran in the same invocation, else `assumed_output_tokens`. Every place it appears
+(JSON field `label`, Markdown heading, table header and each cell) says "estimate".
+*Why chars / 4:* no tokenizer for a hosted model can be loaded offline; the rule is
+stated next to the number.
+
+**faiss is now imported lazily** (`retrieval/index.py`): before, importing the CLI
+loaded faiss for every command, so `eval-verifiers --verifier hhem` would have loaded
+faiss and then torch, which is the OpenMP clash from Part 0. Now faiss loads only
+when an index is built or read.
+
+## Training data and fine-tuning (`training/`, `build-training-data`, `scripts/train_verifier.py`), Part 3
+
+PLAN.md's Weeks 1–2 scope says "no fine-tuning", so it specifies nothing here; this
+part follows the brief directly.
+
+**Seeds: supported pairs from the chunks themselves** (`training/data.py`). A prose
+sentence of 8–45 words is supported by its own chunk; one numeric cell per table row
+becomes a templated claim, "<row label> was <value> for <column header>.", supported by
+its table chunk. The header is the first row with a year in a value column (multi-row
+headers put "Year ended December 31," above the years); "Page" columns (tables of
+contents) and sentences that start with page furniture ("K-106 (31) ...") give no seeds.
+Up to 1,500 seeds per company are sampled with a fixed seed, at most 70% of them with a
+number in the claim and the rest any sentence (`numeric_seed_share`), since gold claims
+are mostly about numbers.
+*Why not the LLM-generated candidate claims:* they are exactly the claims that get
+hand-labeled, so they are the evaluation set's distribution and may not be used.
+
+**From each seed, up to three examples** (rules in `training/perturb.py`):
+
+| Label | How | Rules |
+|---|---|---|
+| supported | the seed, or for half of them a meaning-preserving rewrite | `seed`, `synonym` (increased -> rose), `rescale` ($12,345 million -> $12.3 billion) |
+| contradicted | one perturbation of the claim, evidence unchanged | `numeric`, `scale`, `negation`, `year_swap`, `entity_swap` |
+| unsupported | the unchanged claim with a different chunk | `other_section` (same company, other Item), `other_company` (same split) |
+
+Guards against producing the wrong label: a changed number must not occur anywhere in
+the evidence (else another cell might support it); a year is only swapped for *another
+year present in the evidence*, because per the labeling guide a value on the wrong
+period is contradicted but a period the chunks don't cover is unsupported; a table row
+label is only swapped for a row whose values differ from the claim's numbers;
+`rescale` rounds to the claim's one decimal, which the PLAN.md rounding rule calls
+supported, while `scale` (million <-> billion without rescaling) is the contradicted
+units/scale case. Reference numbers ("Note 14", "ASU 2023-10", "Item 7") are never
+changed by `numeric`, since a different note number is not a factual error. `negation`
+only inserts "not" after an auxiliary (was, were, is, are, did, not has/have, which are
+often main verbs) and never into a claim that already has a negative (no double
+negatives). Prose `entity_swap` only swaps two- or three-word capitalized names that
+don't start a sentence and contain no common word ("Greater China" -> "Latin
+America"). These rules were tightened after a run on the real chunks showed the noise
+each one prevents. The unsupported partner is the most word-similar of 60 sampled
+chunks that contains none of the claim's numbers and not the claim itself: on topic
+(hard) but unable to back it. *Known noise:* negation by inserting "not" can produce
+an odd sentence; a name swapped in prose may also be mentioned in the evidence in a
+way that makes the claim true; a different section can still restate a sentence in
+words; inserting "not" before a negative adjective ("is not unable") flips the
+meaning awkwardly. Label noise is the main reason synthetic scores overstate real
+accuracy. *Balance:* contradicted is the smallest class (~27% of examples on the real
+chunks; some seeds fit no rule), so dev macro-F1, not accuracy, picks the best epoch.
+
+**The gold set never enters training, enforced in code:** every chunk that is a passage
+or evidence chunk in `data/eval/gold_labels.jsonl` or `data/labels/labels.jsonl`, and
+every chunk retrieved for any candidate in `data/candidates/` (labeled or not), is
+removed before seeds and partners are drawn; any example whose claim equals a gold claim
+(whitespace-normalized, case-insensitive) is dropped. The counts go to `manifest.json`
+and into the model card; `build-training-data` warns loudly when it finds nothing to
+exclude (e.g. the gold files weren't pushed before running on Colab).
+
+**Splits are by company** (`config/training.yaml`): each company's examples go to one
+split, and `other_company` partners come from the same split, so no evidence text
+crosses splits either. Default: train JPM, BRK-B, AAPL, MSFT; dev AMZN (model selection
+only); test WMT, XOM, JNJ. *Why this split:* JPM and BRK-B aren't in the labeled set and
+have large filings; adding two labeled companies gives the model filing styles it will
+meet, while WMT, XOM and JNJ are never seen during training or model selection, so
+their rows in `eval-verifiers`' by-company table measure unseen companies. All gold
+passages are excluded from training regardless of the split.
+*Alternative:* train only on JPM and BRK-B, so every gold company is unseen; it's one
+line in the config, at the cost of a less varied training set.
+
+**Training** (`training/train.py`, `scripts/train_verifier.py`): Hugging Face `Trainer`
+on `microsoft/deberta-v3-small` (a strong small encoder for NLI-style pair tasks;
+it fits a T4 at batch 16 and 512 tokens). Input is the (evidence chunk, claim) pair,
+truncating only the evidence (`encode_pair`, the same function shape `FineTunedVerifier`
+uses at inference). 3 epochs, learning rate 3e-5, warmup 10%, weight decay 0.01, fp16
+on CUDA only, best epoch by dev macro-F1. Seeds: `transformers.set_seed(seed)` before
+the model is built (Python, numpy, torch), plus `seed` and `data_seed` in the Trainer;
+`--full-determinism` adds PyTorch's deterministic algorithms. Outputs: the model and
+tokenizer, `metrics.json` (dev and synthetic-test metrics, train loss, every setting and
+library version), `training_manifest.json`, and `README.md`, a model card that states
+the data is synthetic, the exclusion counts, the company splits, the input format, the
+metrics and the limitations. `models/` and `data/training/` are gitignored: weights are
+hundreds of MB, and the data is rebuilt deterministically from the committed chunks.
+*Why no `datasets` package:* a list of tokenized dicts plus `DataCollatorWithPadding`
+is all the Trainer needs, and it's one heavy dependency fewer.
+
+**`FineTunedVerifier`** (`verify/finetuned.py`): loads from a local directory only
+(`local_files_only=True`) and refuses one without `config.json` or whose `id2label`
+doesn't name the three labels. It scores each chunk and aggregates: **supported** if
+any chunk's most likely class is supported (one passage stating the claim is enough,
+as in the guide), else **contradicted** if any chunk's is contradicted, else
+**unsupported**; the chunk the verdict rests on is cited, and `score` is the highest
+P(supported). It plugs into `eval-verifiers --verifier finetuned --finetuned-path DIR`.
+
+**Colab** (`notebooks/finetune_verifier_colab.ipynb`): clone, install `.[train]`,
+`build-training-data`, a 64-example smoke run, the real run, print `metrics.json` and
+the model card, optionally `eval-verifiers` on the gold set on the T4, and download
+the model as a zip. Latency must be re-measured on the Mac for the README.
+
+**Tests** run the real data builder on synthetic multi-company chunks (gold chunk,
+gold claim and candidate chunk all excluded; splits by company; partners in the same
+split; byte-identical output on a re-run), each perturbation rule, and the training
+script and `FineTunedVerifier` over stand-in `transformers` (seeds, Trainer settings,
+id2label, pair order, metrics file, model card, aggregation).
+
+## Error report (`verify/errors.py`, `groundcheck error-report`), Part 4
+
+**What:** `groundcheck error-report` writes `results/error_report.md`: for each verifier
+with predictions (or those named with `--verifier`), a table of claims, errors and error
+rate per edge-case tag, the gold -> predicted confusions by frequency, then every
+misclassified claim grouped by tag: claim ID, gold and predicted label, score, the claim,
+the gold evidence span(s) with their chunk IDs (or "none" for a gold-unsupported claim),
+the span the verifier cited, the labeler's note, company and question type. Prompted
+verifier failures are called out: no parseable JSON, or a quote that is in no passage.
+
+**Why it reads the saved predictions instead of re-running models:** the report then
+explains exactly the run whose numbers are in `verifier_eval.md`, costs nothing, and
+can be regenerated after editing a note. It checks the gold file's sha256 against the
+one stored by `eval-verifiers` and warns if the gold set changed since. Untagged claims
+(`(none)`) come last so the edge cases are read first. *Why Markdown:* it is for reading
+and pasting into notes or an issue; the JSON predictions remain the machine-readable form.
+Spans are shown as double-backtick inline code, so table pipes and dollar signs survive.
+
+## Local demo (`demo/app.py`, `groundcheck demo`), Part 5
+
+**What:** a Gradio page on 127.0.0.1:7860. Pick a company (every company with an index),
+type a question, pick a verifier; the page shows the answer, each claim with its label
+(colored), P(supported) and latency, the cited passage with the evidence span
+highlighted, and all retrieved passages in collapsible blocks.
+
+**Same code paths as the real pipeline:** `DemoPipeline.ask` calls
+`generation.pipeline.Generator.generate` (retrieve top-k from the company's FAISS
+index, answer with the local model using the candidate-generation prompts, split into
+claims with validated JSON), then the chosen verifier from `make_verifier` on the
+retrieved chunks. So the demo shows what the benchmark measures, not a parallel
+implementation. Highlighting uses the span's offsets into the normalized chunk text
+(the gold-span convention) and escapes everything else as HTML.
+
+**Choices:** verifiers are built the first time they're picked and then kept, since
+loading a model takes seconds and switching back should be instant; `--verifiers`
+limits the choices (on 8 GB, the 3B LLM plus DeBERTa-Large plus Flan-T5-base is
+already a lot). The server binds to 127.0.0.1 and always passes `share=False`: a
+public Gradio link would expose a model running on your laptop. Errors are shown in
+the page rather than as a stack trace. `--dry-run` swaps in the fake LLM (the
+answer is the top passage's first sentence) and the fake verifier, for checking the
+page without Ollama or model downloads; the embedder must still match the one the
+indexes were built with. Gradio is in the `[demo]` extra, imported only by `build_app`.
+*Alternative:* Streamlit; it re-runs the whole script on every interaction, which
+would reload the models unless cached by hand, and Gradio's HTML output is enough here.
+
+**Tests** run the pipeline on the tiny corpus with the fake LLM and fake verifier,
+check the highlighting and escaping, and build the app and the `demo` command over a
+stand-in `gradio` module (components, the click handler, and that `launch` gets
+127.0.0.1, port 7860, `share=False`).

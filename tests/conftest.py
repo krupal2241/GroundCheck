@@ -5,12 +5,71 @@ Every test runs with:
   immediately, so no test can ever reach sec.gov (or anything else) by accident;
 - no SEC_USER_AGENT inherited from the developer's shell, and the current directory
   set to an empty temp folder, so neither a real env var nor a real `.env` leaks in.
-  Tests that need a user agent set one explicitly with monkeypatch.setenv.
+  Tests that need a user agent set one explicitly with monkeypatch.setenv;
+- no heavy ML packages: a real import of torch, transformers, sentence-transformers,
+  gradio (or the other names in HEAVY_MODULES) fails the test that attempted it. On a
+  Mac with the extras installed, importing torch after faiss can abort the whole pytest
+  process (two OpenMP runtimes), and CI does not install them anyway. Tests use
+  stand-in modules (`monkeypatch.setitem(sys.modules, "torch", fake)`) or simulate a
+  missing extra with `monkeypatch.setitem(sys.modules, "torch", None)`; both are
+  resolved from sys.modules before this guard is ever asked.
 """
 
+import importlib.abc
 import socket
+import sys
 
 import pytest
+
+HEAVY_MODULES = frozenset(
+    {
+        "accelerate",
+        "datasets",
+        "gradio",
+        "sentence_transformers",
+        "sklearn",
+        "torch",
+        "transformers",
+    }
+)
+
+
+class HeavyImportBlocker(importlib.abc.MetaPathFinder):
+    """Refuses to find heavy packages and remembers who asked.
+
+    It raises ModuleNotFoundError (so an optional probe in a third-party library
+    behaves as if the package were not installed) and records the attempt, so the
+    `_no_heavy_imports` fixture can fail the test even if the error was swallowed.
+    """
+
+    def __init__(self):
+        self.attempts: list[str] = []
+
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname.split(".", 1)[0] in HEAVY_MODULES:
+            self.attempts.append(fullname)
+            raise ModuleNotFoundError(f"tests must not import {fullname} for real", name=fullname)
+        return None
+
+
+HEAVY_IMPORTS = HeavyImportBlocker()
+sys.meta_path.insert(0, HEAVY_IMPORTS)
+
+
+@pytest.fixture(autouse=True)
+def _no_heavy_imports():
+    already_loaded = sorted(m for m in sys.modules if m.split(".", 1)[0] in HEAVY_MODULES)
+    real = [m for m in already_loaded if sys.modules[m] is not None and _is_real(sys.modules[m])]
+    assert not real, f"heavy modules were imported for real before this test: {real}"
+    HEAVY_IMPORTS.attempts.clear()
+    yield
+    attempts, HEAVY_IMPORTS.attempts[:] = list(HEAVY_IMPORTS.attempts), []
+    assert not attempts, f"test tried to import heavy modules for real: {attempts}"
+
+
+def _is_real(module) -> bool:
+    """A module loaded from disk has a __file__; the tests' stand-ins don't."""
+    return getattr(module, "__file__", None) is not None
 
 
 class NetworkBlockedError(RuntimeError):
@@ -146,3 +205,65 @@ def tiny_corpus(tmp_path):
 
     corpus["generate_args"] = generate_args
     return corpus
+
+
+# --- A small gold-label file (the `export-labels` format) for verifier tests -----------
+
+# (claim_id, ticker, claim, label, evidence (chunk_id, quote) or None, edge_case)
+GOLD_ROWS = [
+    ("EXCO-G01#c01", "EXCO", "Total net sales were $12,345 million in fiscal 2025.",
+     "supported", ("EXCO-7-t0000", "Total net sales | $12,345 | $11,646"), None),
+    ("EXCO-G01#c02", "EXCO", "Total net sales increased 6% in fiscal 2025.",
+     "supported", ("EXCO-7-p0000", "Total net sales increased 6% to $12,345 million"), None),
+    ("EXCO-G01#c03", "EXCO", "Total net sales increased 9% to $13,000 million in fiscal 2025.",
+     "contradicted", ("EXCO-7-p0000", "Total net sales increased 6% to $12,345 million"),
+     "numeric_mismatch"),
+    ("EXCO-G02#c01", "EXCO", "The Company repurchased 40 million shares in fiscal 2025.",
+     "supported", ("EXCO-8-p0000", "repurchased 40 million shares"), None),
+    ("OTHR-G01#c01", "OTHR", "The Company opened 40 new stores in Brazil.",
+     "unsupported", None, "absent_evidence"),
+    ("OTHR-G01#c02", "OTHR", "Operating income was $3,500 million in 2025.",
+     "contradicted", ("EXCO-7-t0000", "Operating income | $3,210 | $2,987"), "table_misread"),
+]  # fmt: skip
+
+
+def gold_record(claim_id, ticker, claim, label, evidence, edge_case):
+    from groundcheck.labeling.schema import make_span
+
+    spans = []
+    if evidence:
+        chunk_id, quote = evidence
+        span = make_span(chunk_id, TINY_CHUNKS[chunk_id][2], quote)
+        assert span is not None, quote
+        spans.append(span.model_dump())
+    return {
+        "claim_id": claim_id,
+        "candidate_id": claim_id.split("#")[0] + "@fake:fake-model",
+        "question_id": claim_id.split("#")[0],
+        "ticker": ticker,
+        "qtype": "numeric_lookup",
+        "question": "Q?",
+        "answer": "A.",
+        "claim": claim,
+        "label": label,
+        "evidence": spans,
+        "edge_case": edge_case,
+        "note": "",
+        "passages": [
+            {"rank": rank, "chunk_id": cid, "text": text}
+            for rank, (cid, (_, _, text)) in enumerate(TINY_CHUNKS.items(), start=1)
+        ],
+        "generator": {"provider": "fake", "model": "fake-model", "model_digest": "fake-digest",
+                      "prompt_version": "v1"},
+    }  # fmt: skip
+
+
+@pytest.fixture
+def gold_path(tmp_path):
+    """data/eval/gold_labels.jsonl-style file with six claims (all three labels)."""
+    import json
+
+    path = tmp_path / "eval" / "gold_labels.jsonl"
+    path.parent.mkdir(parents=True)
+    path.write_text("".join(json.dumps(gold_record(*row)) + "\n" for row in GOLD_ROWS))
+    return path
