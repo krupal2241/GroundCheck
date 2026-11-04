@@ -654,3 +654,58 @@ identical retry returns the identical bad answer (and would be a cache hit).
 *Alternative:* grammar-constrained decoding (Ollama's JSON-schema `format`). It is
 newer than some Ollama installs and still needs validation for semantic rules, so the
 generic retry loop comes first.
+
+## Candidate generation (`generation/`, `scripts/generate_candidates.py`), Day 9
+
+**What:** for each question, retrieve the top-k chunks (k = 5, `top_k` in
+`config/llm.yaml`) from the company's FAISS index, have the LLM answer from *only*
+those chunks, then have it split the answer into atomic claims. One `CandidateRecord`
+per question is appended to `data/candidates/<TICKER>.jsonl`: question, `qtype`, which
+file the question came from, retrieval settings (embedder, chunker, k, sha256 of the
+chunks file), the retrieved chunks (rank, ID, score, Item, kind, full text), the
+answer, the claims (each with an ID), the full `LLMMetadata` of both calls, the prompt
+version, the package version and a UTC timestamp. The script is a thin wrapper around
+`groundcheck.generation.runner`, so it is tested like the rest of the package.
+
+**Questions are written once:** the script reads `data/questions/candidate_questions.yaml`
+(created as a template if missing: ten typed slots per labeled company, the PLAN.md mix
+of 2 numeric_lookup, 2 table, 2 multi_step, 1 yes_no, 2 temporal, 1 unanswerable, all
+empty) *and* every entry of `data/eval/retrieval_questions.yaml` whose question text is
+filled in (gold evidence isn't needed to generate). IDs must be unique across both
+files (`AAPL-01` vs `AAPL-G01`); the same question text for the same company is used
+once. Only `role: labeled` companies are used: `--company JPM` is an error and a stray
+BRK-B question is skipped with a warning.
+
+**Prompts** (`generation/prompts.py`, `PROMPT_VERSION = "v1"`): the answer prompt numbers
+the passages with their chunk IDs, tells the model to use only them, copy numbers,
+units and scale exactly, name the period, and reply with a fixed abstention sentence
+when the passages don't answer. The claim prompt asks for standalone, pronoun-free
+claims that keep their number, unit, scale and period, and an empty list for an answer
+that makes no factual claim (an abstention has nothing to label). Claims come back
+through `generate_structured` (validated JSON, up to 3 attempts).
+
+**Resumable and append-only:** each record is written as one line and `fsync`ed as soon
+as it is complete; a re-run reads the existing files and skips every `candidate_id`
+already there. The ID is `<question id>@<provider>:<model>` (claims: `...#c01`), so a
+second model appends its own records instead of being skipped. A crash mid-write leaves
+a partial last line: readers skip it with a warning, and the next append starts on a
+new line, so the file never has to be rewritten. A question whose claim split fails all
+attempts is reported, not written, so the next run retries it; the script exits 1 if
+anything failed. `--batch-size`, `--limit` and `--sleep-between-batches` exist for the
+fanless MacBook Air: e.g. batches of 5 with a 60-second pause. Every index is loaded
+before the first model call, so a missing index fails in a second, not after an hour.
+
+**`--dry-run`** uses the FakeProvider with a responder that answers with the top
+passage's first sentence and splits on sentences. It writes to
+`data/cache/dry-run/candidates/` (gitignored), so a rehearsal can't end up in the
+committed data. *Alternative:* print records without writing. Writing exercises resume
+and append exactly as a real run does.
+
+**Colab** (`notebooks/generate_candidates_colab.ipynb`): clones the repo, installs
+`.[embed,hf]`, builds the indexes from the committed chunks with bge-small on the GPU,
+rehearses with `--dry-run`, then runs the same script with `--provider hf-local`
+(Qwen2.5-3B-Instruct by default) and downloads `data/candidates/` as a zip. Same
+script, same record format; the metadata says which runtime produced each answer.
+*Why a second runtime:* the MacBook Air is slow and throttles; a T4 does a 60-question
+run in minutes. *Why not Ollama on Colab:* it needs a background server process in the
+notebook, which is fragile; `transformers` runs in-process.
