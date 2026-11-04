@@ -810,3 +810,111 @@ happy path, `None` for "extra not installed". *Why not just a lint rule:* the im
 broke happened inside the package code under test, not in the test file.
 *Alternative:* `pytest --forked` or `KMP_DUPLICATE_LIB_OK=TRUE`; the first hides the
 crash in a child process, the second is Intel's own "may cause incorrect results" switch.
+
+## Verifiers (`verify/`), Part 1
+
+**What:** one interface, `Verifier`, and five implementations behind
+`verify.factory.make_verifier(name, VerifierOptions)`: `fake`, `prompted`, `minicheck`,
+`hhem` and (Part 3) `finetuned`. A verifier takes **a claim plus its evidence chunks**
+(`EvidenceChunk(chunk_id, text)`; for the gold set these are the passages retrieved for
+the question, because the labeling guide judges only against them) and returns a
+`Verification`:
+
+| Field | Meaning |
+|---|---|
+| `label` | `supported` / `contradicted` / `unsupported`, the gold vocabulary |
+| `score` | the verifier's estimate that the claim is **supported**, in [0, 1] |
+| `evidence` | an `EvidenceSpan` (chunk ID, normalized text, offsets), or None |
+| `latency_ms` | wall time of the whole `verify` call, measured by `BaseVerifier` |
+| `scores`, `details` | per-label probabilities if the model has them; model-specific extras |
+
+*Why `score` always means P(supported):* it is the one quantity every verifier can
+produce, so binary and three-way verifiers can share a threshold sweep or ROC curve.
+*Why the gold `EvidenceSpan` type:* a predicted span can be compared with the gold span
+directly (same normalization, same offsets). *Why latency in `BaseVerifier`:* the
+timer wraps the same code path for every verifier, including the evidence lookup.
+An empty chunk list returns `unsupported` without calling the model.
+
+**Evidence spans for cross-encoders** (`verify/spans.py`): MiniCheck, HHEM and the
+fine-tuned model say which chunk backs the claim, not which sentence. After the model
+has picked the chunk, the chunk is cut into units (each table row; sentences inside
+prose lines) and the unit covering most of the claim's words is cited, with numbers
+weighted 3x. It is a lexical choice made after the verdict and never changes the label.
+
+**How each model's native output becomes label + score:**
+
+| Verifier | Native output | `score` | `label` |
+|---|---|---|---|
+| `prompted` | JSON `{label, passage, evidence, confidence}` from the LLM | `confidence` if supported, else `1 - confidence` | as the LLM says |
+| `minicheck` | softmax over 2 classes per (chunk, claim); class 1 = supported | max P(supported) over chunks | supported if score >= 0.5, else **unsupported** |
+| `hhem` | consistency score in [0, 1] per (premise = chunk, hypothesis = claim) | max over chunks | supported if score >= 0.5, else **unsupported** |
+| `finetuned` | softmax over the 3 labels per (chunk, claim) | max P(supported) over chunks | see Part 3 |
+| `fake` | lexical rule (no model) | coverage-based | supported / contradicted / unsupported |
+
+**Contradicted and the binary models (MiniCheck, HHEM):** they never predict
+`contradicted`. Their single number means "this evidence backs the claim" vs "it does
+not"; a wrong number and a missing topic both land in "does not", and neither model was
+trained to separate them. Turning a very low score into `contradicted` would invent a
+distinction the model doesn't make, so every not-supported verdict is `unsupported`. The
+consequence is stated in every report: on the three-way metrics their contradicted recall
+is 0 by construction, and their gold-contradicted claims count as errors when predicted
+`unsupported`. To compare them fairly, `eval-verifiers` (Part 2) also reports a
+**binary view** (supported vs not supported) for every verifier. The threshold (0.5,
+`--threshold`) is the models' own decision boundary; it is not tuned on the gold set,
+which would leak the test labels into the verifier.
+
+**Aggregating over chunks:** each claim is scored against every retrieved chunk
+separately in one batch, then the maximum support wins. That is what MiniCheck does
+with long documents, it keeps every input under 512 tokens (chunks are built for
+bge-small's 512), and it matches the guide: one passage stating the claim is enough.
+*Limitation:* a multi_step claim whose two numbers sit in different chunks can't be
+supported by any single chunk. Concatenating the top chunks would exceed 512 tokens;
+the error report (Part 4) will show how often this happens.
+
+**`PromptedLLMVerifier`** (`verify/prompted.py`, prompt version `verify-v1`): goes
+through `make_provider`, so the paid guard applies and Ollama's deterministic settings
+(temperature 0, seed 42) are reused. The prompt is the labeling guide's rules in short
+form plus three worked examples, one per label (a table with correct rounding, a
+direction contradiction, a risk-factor statement that is unsupported), then the
+numbered passages and the claim. JSON is validated and retried with the error appended
+(`generate_structured`, up to 3 attempts). The quoted evidence is looked up in the cited
+passage, then in all of them; a quote that appears nowhere gives no span and
+`quote_found: false`, so a made-up quote is visible instead of trusted. If no attempt
+parses, the verdict is `unsupported` with `parse_error` in `details`, and the evaluator
+counts these. The disk cache is **off** by default for verification, because a cache
+hit has no meaningful latency. *Why a 3B local model at all:* it's the $0 stand-in for
+the "prompted frontier judge" row in the README; a hosted judge is only ever estimated
+(Part 2), never called.
+
+**`MiniCheckVerifier`** (`verify/hf.py`): default `lytang/MiniCheck-DeBERTa-v3-Large`
+(`lytang/MiniCheck-RoBERTa-Large` also works), loaded as a plain
+`AutoModelForSequenceClassification`; input (chunk, claim) with `truncation="only_first"`
+at 512 tokens, so a long chunk is cut rather than the claim. The class index for
+"supported" is read from `id2label` when the labels are named, else index 1 (the
+generic `LABEL_1`). The Flan-T5 and 7B MiniCheck variants need the `minicheck` package
+and a generative head, so they are refused with a pointer to the supported ones.
+*Why DeBERTa-Large:* the best of the MiniCheck checkpoints that load with plain
+`transformers` (no extra package from git), and it fits an 8 GB Mac.
+
+**`HHEMVerifier`**: Vectara's HHEM-2.1-Open (`vectara/hallucination_evaluation_model`,
+a Flan-T5-base classifier), through its own `predict([(premise, hypothesis)])`. The
+checkpoint ships custom modeling code, so it needs `trust_remote_code=True`; `--revision`
+pins the Hub commit (whose code you can read first), and the loaded commit is
+recorded in `identity()` either way.
+
+**Device:** `pick_device` picks CUDA (Colab), else Apple MPS, else CPU; `--device`
+overrides. `torch` and `transformers` live in the new `[verifiers]` extra (plus
+`sentencepiece` and `protobuf` for the DeBERTa-v3 and T5 tokenizers) and are imported
+only when a verifier is built; a missing extra is a one-line error saying what to install.
+
+**`FakeVerifier`**: a lexical rule (coverage of the claim's words and numbers in the best
+unit; a well-covered claim with a different number is `contradicted`), or scripted
+labels for tests. It is what dry runs and the offline demo use, and it doubles as a
+trivial baseline.
+
+**Tests** run the real `MiniCheckVerifier`/`HHEMVerifier` code over stand-in `torch` and
+`transformers` modules (`tests/hf_standins.py`, numpy-backed tensors and a lexical
+"model"): which model and kwargs are loaded, the (chunk, claim) order, truncation,
+device choice, the threshold, and that a binary model never says contradicted.
+*What they can't check:* the real checkpoints' label order and score quality; those are
+listed for verification on the Mac.

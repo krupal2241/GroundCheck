@@ -39,6 +39,16 @@ hf = [
     "transformers>=4.43",
 ]
 
+# Open verifier models (MiniCheck, HHEM) and the fine-tuned verifier, run locally on CPU
+# or Apple MPS. Never installed in CI: tests use stand-in torch/transformers modules.
+# sentencepiece/protobuf: the DeBERTa-v3 and Flan-T5 tokenizers need them.
+verifiers = [
+    "protobuf>=4.25",
+    "sentencepiece>=0.2",
+    "torch>=2.2",
+    "transformers>=4.43",
+]
+
 [project.scripts]
 groundcheck = "groundcheck.cli:main"
 
