@@ -13,14 +13,13 @@ from groundcheck.generation.pipeline import RetrievalInfo
 from groundcheck.generation.prompts import fake_responder
 from groundcheck.llm.fake import FakeProvider
 from groundcheck.retrieval.embedder import HashingEmbedder
-from groundcheck.retrieval.index import CompanyIndex
 from groundcheck.verify.fake import FakeVerifier
 
 
 @pytest.fixture
 def pipeline(tiny_corpus):
     embedder = HashingEmbedder()
-    index = CompanyIndex.load("EXCO", tiny_corpus["chunks"], tiny_corpus["index"])
+    retriever = tiny_corpus["retriever"]()
     built = []
 
     def build(name):
@@ -29,7 +28,7 @@ def pipeline(tiny_corpus):
 
     demo = DemoPipeline(
         provider=FakeProvider(responder=fake_responder),
-        retrieve=lambda ticker, question, k: index.search(embedder, question, k),
+        retrieve=retriever.search,
         retrieval_info=lambda t: RetrievalInfo(
             embedder=embedder.name, chunker="c", top_k=3, chunks_sha256="x"
         ),
@@ -116,7 +115,7 @@ def test_demo_command_dry_run_launches_locally(tiny_corpus, monkeypatch, capsys)
     recorder = {}
     monkeypatch.setitem(sys.modules, "gradio", fake_gradio(recorder))
     args = [
-        "demo", "--dry-run", "--embedder", "hashing",
+        "demo", "--dry-run", "--retrieval-config", str(tiny_corpus["retrieval_config"]),
         "--config", str(tiny_corpus["config"]),
         "--chunks-dir", str(tiny_corpus["chunks"]),
         "--index-dir", str(tiny_corpus["index"]),
@@ -133,6 +132,7 @@ def test_demo_command_dry_run_launches_locally(tiny_corpus, monkeypatch, capsys)
 def test_demo_without_indexes_is_a_clean_error(tmp_path, capsys):
     config = tmp_path / "companies.yaml"
     config.write_text("companies:\n  - {ticker: EXCO, name: E, cik: 1, role: labeled}\n")
-    args = ["demo", "--config", str(config), "--index-dir", str(tmp_path / "none")]
+    args = ["demo", "--config", str(config), "--index-dir", str(tmp_path / "none"),
+            "--embedder", "hashing"]  # fmt: skip
     assert main(args) == 2
-    assert "run `groundcheck index`" in capsys.readouterr().err
+    assert "run `groundcheck index --variant" in capsys.readouterr().err

@@ -1,10 +1,14 @@
 """One exact-cosine FAISS index per company.
 
-Layout (gitignored, rebuilt from the committed chunks):
+Layout (gitignored, rebuilt from the committed chunks). Retrieval variants keep their
+indexes in one folder per embedding (see `retrieval/retriever.py`), e.g.
+`data/index/BAAI_bge-small-en-v1.5+headers-h1/`, and inside it:
 
-    data/index/<TICKER>/index.faiss   the vectors (IndexFlatIP over unit vectors)
-    data/index/<TICKER>/meta.json     embedder name and dim, the chunk IDs in vector
-                                      order, and the sha256 of the chunks file
+    <TICKER>/index.faiss   the vectors (IndexFlatIP over unit vectors)
+    <TICKER>/meta.json     embedder name and dim, the variant that built the index, its
+                           embedding key, the sha256 of the exact texts that were
+                           embedded, the chunk IDs in vector order, and the sha256 of
+                           the chunks file
 
 Why one index per company: every question is about one filing, so searching only that
 filing's index gives it the full `top_k` from the right 10-K, and a similar sentence
@@ -15,7 +19,9 @@ an index (e.g. `eval-verifiers`) don't load it. On macOS, faiss and torch each b
 OpenMP runtime, and loading both into one process can abort it (docs/DESIGN.md, Part 0).
 
 The meta file makes stale indexes loud: loading fails if the chunks file has changed
-since the index was built, or if the query embedder differs from the one used to build.
+since the index was built, if the texts a variant would embed (e.g. with or without
+contextual headers) differ from the ones that were embedded, or if the query embedder
+differs from the one used to build.
 """
 
 import hashlib
@@ -29,6 +35,7 @@ import numpy as np
 from groundcheck.chunking.base import Chunk, chunks_path, read_chunks
 from groundcheck.config import REPO_ROOT, ConfigError
 from groundcheck.retrieval.embedder import Embedder
+from groundcheck.retrieval.variants import texts_sha256
 
 if TYPE_CHECKING:
     import faiss
@@ -61,14 +68,28 @@ def build_index(vectors: np.ndarray) -> "faiss.IndexFlatIP":
 
 
 def build_company_index(
-    ticker: str, embedder: Embedder, chunks_dir: Path, index_dir: Path = DEFAULT_INDEX_DIR
+    ticker: str,
+    embedder: Embedder,
+    chunks_dir: Path,
+    index_dir: Path = DEFAULT_INDEX_DIR,
+    *,
+    texts: list[str] | None = None,
+    variant: str | None = None,
+    embedding: str | None = None,
 ) -> int:
-    """Embed a company's chunks and write its index. Returns the number of vectors."""
+    """Embed a company's chunks and write its index. Returns the number of vectors.
+
+    `texts` (one per chunk, in chunk order) is what gets embedded: by default the chunk
+    text itself; a variant with contextual headers passes header + text. Only the
+    vectors depend on it; the chunks file is never rewritten."""
     source = chunks_path(ticker, chunks_dir)
     chunks = read_chunks(source)
     if not chunks:
         raise ConfigError(f"{source} has no chunks")
-    vectors = embedder.embed_documents([c.text for c in chunks])
+    texts = [c.text for c in chunks] if texts is None else texts
+    if len(texts) != len(chunks):
+        raise ConfigError(f"{ticker}: {len(texts)} texts for {len(chunks)} chunks")
+    vectors = embedder.embed_documents(texts)
     index = build_index(vectors)
     out = index_dir / ticker
     out.mkdir(parents=True, exist_ok=True)
@@ -77,6 +98,9 @@ def build_company_index(
         "ticker": ticker,
         "embedder": embedder.name,
         "dim": embedder.dim,
+        "variant": variant,
+        "embedding": embedding or embedder.name,
+        "embedded_texts_sha256": texts_sha256(texts),
         "chunker": chunks[0].chunker,
         "chunks_file": source.name,
         "chunks_sha256": file_sha256(source),
@@ -89,31 +113,62 @@ def build_company_index(
 class CompanyIndex:
     """A loaded per-company index plus the chunks its vectors point to."""
 
-    def __init__(self, ticker: str, index: "faiss.Index", chunks: list[Chunk], embedder_name: str):
+    def __init__(
+        self,
+        ticker: str,
+        index: "faiss.Index",
+        chunks: list[Chunk],
+        embedder_name: str,
+        meta: dict | None = None,
+    ):
         if index.ntotal != len(chunks):
             raise ConfigError(f"{ticker}: index has {index.ntotal} vectors, {len(chunks)} chunks")
         self.ticker = ticker
         self.index = index
         self.chunks = chunks
         self.embedder_name = embedder_name
+        self.meta = meta or {}
 
     @classmethod
     def load(
-        cls, ticker: str, chunks_dir: Path, index_dir: Path = DEFAULT_INDEX_DIR
+        cls,
+        ticker: str,
+        chunks_dir: Path,
+        index_dir: Path = DEFAULT_INDEX_DIR,
+        *,
+        variant: str | None = None,
+        embedding: str | None = None,
+        expected_texts: list[str] | None = None,
     ) -> "CompanyIndex":
+        """Load and check an index. A variant passes its name, its embedding key and the
+        texts it would embed; an index built for anything else is refused."""
         folder = index_dir / ticker
+        hint = f"`groundcheck index --variant {variant}`" if variant else "`groundcheck index`"
         if not (folder / "meta.json").is_file():
-            raise ConfigError(f"no index for {ticker} in {index_dir}; run `groundcheck index`")
+            raise ConfigError(f"no index for {ticker} in {index_dir}; run {hint}")
         meta = json.loads((folder / "meta.json").read_text())
         source = chunks_path(ticker, chunks_dir)
         if not source.is_file() or file_sha256(source) != meta["chunks_sha256"]:
             raise ConfigError(
-                f"{ticker}: {source} changed since the index was built; re-run `groundcheck index`"
+                f"{ticker}: {source} changed since the index was built; re-run {hint}"
+            )
+        built_by = f"variant {meta.get('variant')!r} ({meta.get('embedding', meta['embedder'])})"
+        if embedding is not None and meta.get("embedding", meta["embedder"]) != embedding:
+            raise ConfigError(
+                f"{ticker}: the index in {folder} was built by {built_by}, but variant "
+                f"{variant!r} needs {embedding}; run {hint}"
+            )
+        if expected_texts is not None and meta.get("embedded_texts_sha256") != texts_sha256(
+            expected_texts
+        ):
+            raise ConfigError(
+                f"{ticker}: the index in {folder} was built by {built_by} from different "
+                f"texts than variant {variant!r} embeds; run {hint}"
             )
         by_id = {c.chunk_id: c for c in read_chunks(source)}
         chunks = [by_id[i] for i in meta["chunk_ids"]]
         index = _faiss().read_index(str(folder / "index.faiss"))
-        return cls(ticker, index, chunks, meta["embedder"])
+        return cls(ticker, index, chunks, meta["embedder"], meta)
 
     def search(self, embedder: Embedder, query: str, k: int = 10) -> list[Hit]:
         if embedder.name != self.embedder_name:

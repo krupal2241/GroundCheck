@@ -3,7 +3,9 @@
 Reads:
 - `results/verifier_eval.json` (from `groundcheck eval-verifiers`), plus a listing of
   any other `results/*.json`;
-- `data/eval/results/*.json` (from `groundcheck eval-retrieval`, one per embedder);
+- `data/eval/results/retrieval_*.json` (from `groundcheck eval-retrieval`, one per
+  retrieval variant) and, when it exists, `data/eval/results/compare.json` (from
+  `groundcheck eval-retrieval --compare`: every configured variant side by side);
 - the label file and candidates, for the class-balance table of the dataset card.
 
 Writes:
@@ -25,6 +27,7 @@ which `eval-verifiers` computed and labeled as an estimate. A missing input is w
 as "not run yet" with the command that produces it, never as a number.
 """
 
+import json
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -36,6 +39,7 @@ from groundcheck.labeling.schema import LABELS
 from groundcheck.retrieval.evaluate import RetrievalReport
 from groundcheck.verify.evaluate import EvalResults, VerifierReport
 
+COMPARE_FILE = "compare.json"
 RESULTS_START = "<!-- RESULTS:START -->"
 RESULTS_END = "<!-- RESULTS:END -->"
 BALANCE_START = "<!-- BALANCE:START -->"
@@ -56,6 +60,7 @@ class Inputs:
     verifier: EvalResults | None = None
     verifier_path: Path | None = None
     retrieval: dict[str, RetrievalReport] = field(default_factory=dict)  # file name -> report
+    compare: dict | None = None  # compare.json, if `eval-retrieval --compare` has run
     other_results: list[str] = field(default_factory=list)
     balance: dict | None = None  # see class_balance()
     missing: list[str] = field(default_factory=list)  # "what: how to make it"
@@ -107,7 +112,18 @@ def load_inputs(
         inputs.other_results = sorted(
             p.name for p in results_dir.glob("*.json") if p.name != "verifier_eval.json"
         )
+    compare_path = retrieval_dir / COMPARE_FILE
+    if compare_path.is_file():
+        try:
+            data = json.loads(compare_path.read_text())
+            if not isinstance(data, dict) or not isinstance(data.get("variants"), list):
+                raise ValueError("no variants list")
+            inputs.compare = data
+        except ValueError:
+            inputs.problems.append(f"{_show(compare_path)} is not a comparison file; skipped")
     for p in sorted(retrieval_dir.glob("*.json")) if retrieval_dir.is_dir() else []:
+        if p.name == COMPARE_FILE:
+            continue
         try:
             inputs.retrieval[p.name] = RetrievalReport.model_validate_json(p.read_text())
         except ValidationError:
@@ -154,17 +170,18 @@ def retrieval_table(inputs: Inputs) -> list[str]:
         return ["*Not run yet:* `groundcheck eval-retrieval` writes `data/eval/results/`.", ""]
     ks = sorted({k for r in inputs.retrieval.values() for k in r.ks})
     lines = [
-        "| Embedder | Chunker | Questions | "
+        "| Variant | Retriever | Chunker | Questions | "
         + " | ".join(f"Recall@{k}" for k in ks)
         + " | "
         + " | ".join(f"Section hit@{k}" for k in ks)
         + " |",
-        "|---|---|---|" + "---|" * (2 * len(ks)),
+        "|---|---|---|---|" + "---|" * (2 * len(ks)),
     ]
     for report in inputs.retrieval.values():
         o = report.overall
+        variant = f"`{report.variant}`" if report.variant else "(before variants)"
         lines.append(
-            f"| `{report.embedder}` | `{report.chunker}` | {o.n} | "
+            f"| {variant} | `{report.embedder}` | `{report.chunker}` | {o.n} | "
             + " | ".join(_pct(o.recall.get(k)) for k in ks)
             + " | "
             + " | ".join(_pct(o.section_hit.get(k)) for k in ks)
@@ -175,6 +192,43 @@ def retrieval_table(inputs: Inputs) -> list[str]:
         "Recall@k: share of the gold evidence strings found in the top k chunks; section "
         "hit@k: a top-k chunk comes from the gold Item. Unanswerable and unfilled "
         "questions are excluded.",
+        "",
+    ]
+    return lines
+
+
+def _num(x) -> str:
+    return "n/a" if x is None else f"{x:.2f}"
+
+
+def compare_table(compare: dict | None) -> list[str]:
+    """The `eval-retrieval --compare` table, copied from compare.json (no recomputation)."""
+    if not compare:
+        return []
+    ks = [int(k) for k in compare.get("ks", [])]
+    head = ["Variant", *[f"R@{k}" for k in ks], *[f"S@{k}" for k in ks], "MRR", "ms/query"]
+    lines = [
+        "| " + " | ".join(head) + " |",
+        "|---|" + "---:|" * (len(head) - 1),
+    ]
+    for row in compare["variants"]:
+        recall, hit = row.get("recall", {}), row.get("section_hit", {})
+        name = f"`{row.get('variant', '?')}`" + (" (diagnostic)" if row.get("diagnostic") else "")
+        cells = [name]
+        cells += [_num(recall.get(str(k), recall.get(k))) for k in ks]
+        cells += [_num(hit.get(str(k), hit.get(k))) for k in ks]
+        latency = row.get("latency_ms")
+        cells += [_num(row.get("mrr")), "n/a" if latency is None else f"{latency:.1f}"]
+        lines.append("| " + " | ".join(cells) + " |")
+    lines.append("")
+    if compare.get("recommendation"):
+        lines += [f"Rule-based recommendation: {compare['recommendation']}", ""]
+    if compare.get("note"):
+        lines += [f"*{compare['note']}*", ""]
+    lines += [
+        "R@k: recall@k; S@k: section hit@k; MRR over the top 10; latency is the mean wall "
+        "time of one search on the machine that ran the comparison. The variant actually "
+        "used is `default` in `config/retrieval.yaml`.",
         "",
     ]
     return lines
@@ -324,6 +378,8 @@ def results_markdown(inputs: Inputs, figures: list[str]) -> str:
     if inputs.missing:
         lines += ["**Not run yet:**", ""] + [f"- {m}" for m in inputs.missing] + [""]
     lines += ["## Retrieval", "", *retrieval_table(inputs)]
+    if inputs.compare:
+        lines += ["## Retrieval variant comparison", "", *compare_table(inputs.compare)]
     lines += ["## Verifier comparison", "", *verifier_table(inputs.verifier)]
     if inputs.verifier is not None:
         lines += ["## Accuracy by edge case", ""]
@@ -352,6 +408,11 @@ def readme_section(inputs: Inputs) -> str:
         "### Retrieval",
         "",
         *retrieval_table(inputs),
+        *(
+            ["#### Retrieval variants", "", *compare_table(inputs.compare)]
+            if inputs.compare
+            else []
+        ),
         "### Verifier benchmark",
         "",
         *verifier_table(inputs.verifier),

@@ -156,3 +156,43 @@ def test_pipeline_command(tmp_path, capsys):
     assert (scratch / "index").is_dir() and (scratch / "state" / "index.json").is_file()
     assert main(["pipeline", "--dry-run", "--scratch-dir", str(scratch), "--from", "parse",
                  "--to", "download"]) == 2  # fmt: skip
+
+
+def test_retrieval_stages_use_the_configured_variant(ctx):
+    """index, eval-retrieval and generate open the variant from config/retrieval.yaml
+    (the repo's default, with the offline fakes swapped in for its models)."""
+    from groundcheck.retrieval.variants import load_retrieval_config
+
+    default = load_retrieval_config(ctx.paths.retrieval_config).default
+    run_pipeline(ctx, end="generate")
+    report = json.loads((ctx.paths.retrieval_results / f"retrieval_{default}.json").read_text())
+    assert report["variant"] == default
+    candidates = load_candidates(ctx.paths.candidates)
+    assert {c.retrieval.variant for c in candidates} == {default}
+    assert {c.mode for c in candidates} == {"rag", "no-context", "wrong-context"}
+
+
+def test_variant_option_reruns_retrieval_and_compare_feeds_the_report(ctx, tmp_path):
+    run_pipeline(ctx, end="eval-retrieval")
+    # Another variant: different settings, so index and eval-retrieval run again.
+    bm25 = Context(ctx.paths, Options(dry_run=True, variant="bm25"), ctx.echo)
+    assert statuses(run_pipeline(bm25, start="index", end="eval-retrieval")) == {
+        "index": "ran",
+        "eval-retrieval": "ran",
+    }
+    assert (ctx.paths.retrieval_results / "retrieval_bm25.json").is_file()
+    # --compare: every variant indexed and compared; the report shows the comparison.
+    compare = Context(ctx.paths, Options(dry_run=True, compare=True, modes=("rag",)), ctx.echo)
+    result = statuses(run_pipeline(compare, start="index", end="eval-retrieval"))
+    assert result == {"index": "ran", "eval-retrieval": "ran"}
+    data = json.loads((ctx.paths.retrieval_results / "compare.json").read_text())
+    names = {row["variant"] for row in data["variants"]}
+    assert {"dense", "hybrid", "bm25", "hybrid-headers-rerank"} <= names
+    assert statuses(run_pipeline(compare, start="report")) == {"report": "ran"}
+    results_md = (ctx.paths.docs / "RESULTS.md").read_text()
+    assert (
+        "## Retrieval variant comparison" in results_md and "`hybrid-headers-rerank`" in results_md
+    )
+    with pytest.raises(ConfigError, match="drop --variant"):
+        both = Options(dry_run=True, compare=True, variant="bm25", force=True)
+        runner.run_eval_retrieval(Context(ctx.paths, both, ctx.echo))

@@ -27,7 +27,9 @@ verifier in this repository.
    `data/questions/candidate_questions.yaml`. **All were drafted by an AI assistant
    (Claude) from the committed chunks**, at the author's request, with notes giving the
    expected answer and its source text; the author is responsible for reviewing them.
-2. **Retrieval.** bge-small-en-v1.5 embeddings, one exact FAISS index per company, top
+2. **Retrieval.** The retrieval variant configured in `config/retrieval.yaml` (default
+   `hybrid`: bge-small-en-v1.5 embeddings in one exact FAISS index per company plus
+   BM25, merged by reciprocal rank fusion), recorded in every candidate, top
    5 chunks per question. Chunks are 250-word prose windows (50-word overlap) and
    table chunks split on row boundaries with the header repeated.
 3. **Answers, in three generation modes** (`scripts/generate_candidates.py --mode`):

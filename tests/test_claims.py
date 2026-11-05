@@ -32,7 +32,6 @@ from groundcheck.llm.cache import cache_key
 from groundcheck.llm.fake import FakeProvider
 from groundcheck.llm.structured import StructuredOutputError
 from groundcheck.retrieval.embedder import HashingEmbedder
-from groundcheck.retrieval.index import CompanyIndex
 
 BAD_ANSWER = (
     "According to passage [1], the Company repurchased 402 million shares of its common "
@@ -243,13 +242,13 @@ def test_empty_list_is_retried_unless_the_answer_abstains():
 
 
 def test_generator_records_filter_stats_and_uses_the_company_name(tiny_corpus):
-    index = CompanyIndex.load("EXCO", tiny_corpus["chunks"], tiny_corpus["index"])
+    retriever = tiny_corpus["retriever"]()
     embedder = HashingEmbedder()
     info = RetrievalInfo(embedder=embedder.name, chunker="c", top_k=3, chunks_sha256="s")
     fake = FakeProvider(script=[BAD_ANSWER, as_json(BAD_SPLIT), as_json(GOOD_SPLIT)])
     generator = Generator(
         fake,
-        lambda t, q, k: index.search(embedder, q, k),
+        retriever.search,
         lambda t: info,
         LLMConfig(top_k=3),
         {"EXCO": "Example Corp"},

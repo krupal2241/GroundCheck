@@ -14,6 +14,10 @@ Per question, for each k:
 - **section-hit@k** = 1 if any of the top-k chunks comes from a gold Item section,
   else 0. Gold sections are `gold_items` if you give them; otherwise they're the
   sections whose chunks contain a gold string.
+- **reciprocal rank** = 1 / the rank of the first retrieved chunk containing any gold
+  string, 0 if none is in the top max(k). MRR is its mean.
+- **latency** = wall time of the retrieve call for that question, in milliseconds
+  (query embedding, search, fusion and reranking; model loading is not included).
 
 Reported numbers are means over the evaluated questions. Questions are skipped (and
 counted) when they're still unfilled template entries, `unanswerable` (nothing to
@@ -22,6 +26,7 @@ last case is a typo or a normalization mismatch, not a retrieval miss, so it's
 reported as a warning rather than scored as a zero.
 """
 
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Literal
@@ -100,6 +105,8 @@ class QuestionResult(BaseModel):
     missing_gold: list[str] = Field(default_factory=list)
     retrieved: list[str] = Field(default_factory=list)  # chunk IDs, best first
     first_gold_rank: int | None = None  # rank of the first chunk containing any gold
+    reciprocal_rank: float | None = None
+    latency_ms: float | None = None
     recall: dict[int, float] = Field(default_factory=dict)
     section_hit: dict[int, float] = Field(default_factory=dict)
 
@@ -108,10 +115,13 @@ class Summary(BaseModel):
     n: int
     recall: dict[int, float]
     section_hit: dict[int, float]
+    mrr: float = 0.0
+    latency_ms: float = 0.0  # mean per query
 
 
 class RetrievalReport(BaseModel):
-    embedder: str
+    variant: str = ""
+    embedder: str  # the retriever's description (models and stages)
     chunker: str
     ks: list[int]
     overall: Summary
@@ -158,7 +168,9 @@ def evaluate_question(
         return QuestionResult(**base, status="gold_not_in_corpus", missing_gold=missing)
     gold_items = question.gold_items or found_items
 
+    start = time.perf_counter()
     hits = retrieve(question.ticker, question.question, max(ks))
+    latency_ms = (time.perf_counter() - start) * 1000
     first = next((r for r, c in enumerate(hits, 1) if any(contains(c, g) for g in golds)), None)
     recall, section_hit = {}, {}
     for k in ks:
@@ -172,6 +184,8 @@ def evaluate_question(
         gold_items=gold_items,
         retrieved=[c.chunk_id for c in hits],
         first_gold_rank=first,
+        reciprocal_rank=1.0 / first if first else 0.0,
+        latency_ms=latency_ms,
         recall=recall,
         section_hit=section_hit,
     )
@@ -213,6 +227,8 @@ def summarize(results: list[QuestionResult], ks: tuple[int, ...]) -> Summary:
         n=n,
         recall={k: mean([r.recall[k] for r in scored]) for k in ks},
         section_hit={k: mean([r.section_hit[k] for r in scored]) for k in ks},
+        mrr=mean([r.reciprocal_rank or 0.0 for r in scored]),
+        latency_ms=mean([r.latency_ms or 0.0 for r in scored]),
     )
 
 
@@ -222,6 +238,7 @@ def evaluate(
     retrieve: Retriever,
     embedder: str,
     ks: tuple[int, ...] = DEFAULT_KS,
+    variant: str = "",
 ) -> RetrievalReport:
     unknown = sorted({q.ticker for q in questions if q.is_filled} - set(corpora))
     if unknown:
@@ -234,6 +251,7 @@ def evaluate(
         if r.status != "evaluated":
             skipped[r.status] = skipped.get(r.status, 0) + 1
     return RetrievalReport(
+        variant=variant,
         embedder=embedder,
         chunker=", ".join(chunkers),
         ks=list(ks),
@@ -254,15 +272,17 @@ def evaluate(
 def format_report(report: RetrievalReport) -> str:
     ks = report.ks
     header = f"{'':<18} {'n':>4}  " + "  ".join(f"R@{k:<3}" for k in ks) + "  "
-    header += "  ".join(f"S@{k:<3}" for k in ks)
+    header += "  ".join(f"S@{k:<3}" for k in ks) + "  MRR    ms/q"
 
     def row(label: str, s: Summary) -> str:
         cells = [f"{s.recall[k]:.2f} " for k in ks] + [f"{s.section_hit[k]:.2f} " for k in ks]
+        cells += [f"{s.mrr:.2f} ", f"{s.latency_ms:6.1f}"]
         return f"{label:<18} {s.n:>4}  " + "  ".join(cells)
 
+    variant = f"Variant: {report.variant}   " if report.variant else ""
     lines = [
-        f"Embedder: {report.embedder}   Chunker: {report.chunker or '-'}",
-        "R@k = recall@k, S@k = section-hit@k",
+        f"{variant}Retriever: {report.embedder}   Chunker: {report.chunker or '-'}",
+        "R@k = recall@k, S@k = section-hit@k, MRR = mean reciprocal rank, ms/q = mean latency",
         header,
         row("overall", report.overall),
     ]

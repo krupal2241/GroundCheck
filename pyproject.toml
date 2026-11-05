@@ -37,6 +37,12 @@ report = [
 embed = [
     "sentence-transformers>=3.0",
 ]
+# The cross-encoder reranker (BAAI/bge-reranker-base) for the *-rerank retrieval
+# variants. Same library as [embed]; a separate extra so the default install says
+# exactly which models it can load. Never installed in CI: tests use a fake reranker.
+rerank = [
+    "sentence-transformers>=3.0",
+]
 # A local Hugging Face model for candidate generation on a Colab GPU (HFLocalProvider).
 hf = [
     "accelerate>=0.30",

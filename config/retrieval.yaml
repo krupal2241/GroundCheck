@@ -1,0 +1,65 @@
+# Retrieval variants. `groundcheck index`, `retrieve`, `eval-retrieval` and
+# scripts/generate_candidates.py use `default` unless --variant picks another;
+# `groundcheck eval-retrieval --compare` runs every variant listed here.
+#
+# Per variant:
+#   diagnostic  true: shown by --compare but never recommended as the default
+#   embedder  bge-small | bge-base | hashing (offline fake) | null (no dense stage)
+#   headers   true: embed "<TICKER> FY<year> 10-K | Item <n> <title> | <prose|table>"
+#             + the chunk text. Only the embedded (and reranked) text gets the header;
+#             the stored chunk text never changes, so gold strings stay exact.
+#   bm25      true: add a BM25 ranking, merged with the dense one by reciprocal rank
+#             fusion (or BM25 alone when embedder is null)
+#   rerank    bge-reranker-base (needs the [rerank] extra) | overlap (offline fake) | null
+#
+# pool: candidates taken from each first-stage ranking for fusion, and reranked.
+# rrf_k: the RRF constant, score = sum of 1 / (rrf_k + rank).
+#
+# Memory on an 8 GB MacBook Air: bge-small ~130 MB, bge-base ~440 MB,
+# bge-reranker-base ~1.1 GB; any single variant fits comfortably next to Ollama.
+
+# The default is provisional until `groundcheck eval-retrieval --compare` runs on the Mac
+# (the sandbox cannot download the models). Rule: best recall@5, but the cheapest
+# variant within 0.05 of it. Measured so far, on the 30 AI-drafted questions: dense
+# (bge-small) recall@5 0.50, BM25 alone 0.62. hybrid keeps that lexical signal for
+# about 1 ms more per query and no extra model; see docs/DESIGN.md, "Retrieval variants".
+default: hybrid
+pool: 30
+rrf_k: 60
+
+variants:
+  dense:
+    description: "baseline: bge-small, chunk text only"
+    embedder: bge-small
+  dense-headers:
+    description: "bge-small on header + chunk text"
+    embedder: bge-small
+    headers: true
+  hybrid:
+    description: "bge-small + BM25, RRF"
+    embedder: bge-small
+    bm25: true
+  hybrid-headers:
+    description: "bge-small on header + text, + BM25, RRF"
+    embedder: bge-small
+    headers: true
+    bm25: true
+  hybrid-headers-rerank:
+    description: "hybrid-headers, top 30 reranked by bge-reranker-base"
+    embedder: bge-small
+    headers: true
+    bm25: true
+    rerank: bge-reranker-base
+  dense-base:
+    description: "bge-base instead of bge-small"
+    embedder: bge-base
+  hybrid-headers-base:
+    description: "bge-base on header + text, + BM25, RRF"
+    embedder: bge-base
+    headers: true
+    bm25: true
+  bm25:
+    description: "BM25 alone, no model: shows how much the eval rewards exact terms"
+    diagnostic: true   # compared, never recommended as the default
+    embedder: null
+    bm25: true

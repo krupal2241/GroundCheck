@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Generate candidate answers and claims for the labeled test set.
 
-Per question: retrieve the top-k chunks from the company's FAISS index, answer from
-only those chunks with a local LLM (Ollama by default), split the answer into atomic
-claims, and append one record to data/candidates/<TICKER>.jsonl. Resumable: re-running
-skips questions that already have a record for the same provider and model.
+Per question: retrieve the top-k chunks with the configured retrieval variant
+(config/retrieval.yaml `default`, or --variant), answer from only those chunks with a
+local LLM (Ollama by default), split the answer into atomic claims, and append one
+record to data/candidates/<TICKER>.jsonl; each record names the retrieval variant that
+produced it. Resumable: re-running skips questions that already
+have a record for the same provider and model (and refuses to mix in another variant).
 
 Examples:
     python scripts/generate_candidates.py --dry-run --limit 3

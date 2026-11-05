@@ -27,10 +27,10 @@ flowchart LR
     subgraph Data["Corpus ($0, local)"]
         A[SEC EDGAR<br/>8 pinned 10-Ks] -->|download, rate-limited| B[parse<br/>Items 1, 1A, 7, 8<br/>tables as rows]
         B --> C[chunk<br/>prose 250 words<br/>tables by row]
-        C --> D[index<br/>bge-small + FAISS<br/>one per company]
+        C --> D[index<br/>retrieval variant: bge-small FAISS<br/>+ BM25 hybrid by default<br/>one per company]
     end
     subgraph Gen["Candidate generation (Ollama llama3.2:3b)"]
-        Q[60 questions<br/>6 types] --> R[retrieve top-5]
+        Q[60 questions<br/>6 types] --> R[retrieve top-5<br/>configured variant]
         D --> R
         R --> M{mode}
         M -->|rag| ANS[answer]
@@ -105,6 +105,19 @@ files. Until a real run exists it stays TBD; nothing here is estimated.
 fills in this section, [docs/RESULTS.md](docs/RESULTS.md) and the charts.
 <!-- RESULTS:END -->
 
+**Retrieval measured so far** (manual runs before `groundcheck report` existed; kept for
+reference until the report replaces them). On the 30 questions in
+`data/eval/retrieval_questions.yaml`, drafted by an AI from the filings and not yet
+reviewed, so differences under about 0.1 are noise:
+
+| Variant | recall@1 | recall@5 | recall@10 |
+|---|---|---|---|
+| `dense` (bge-small, baseline) | 0.23 | 0.50 | 0.62 |
+| `bm25` (BM25 alone, diagnostic) | 0.33 | 0.62 | 0.65 |
+| other variants | TBD | TBD | TBD |
+
+Variants and how to compare them: [docs/DESIGN.md](docs/DESIGN.md), "Retrieval variants".
+
 ## Quickstart: 8 GB MacBook Air, $0
 
 Python 3.11+ and [Ollama](https://ollama.com/download). Everything runs locally.
@@ -132,6 +145,9 @@ The dry run uses synthetic filings and fake models and writes only to
 pip install -e ".[dev,embed,verifiers,report]"
 ```
 
+Add `rerank` (`pip install -e ".[dev,embed,rerank]"`) only to try the cross-encoder
+reranker variant; the default retriever doesn't need it.
+
 ```bash
 cp .env.example .env    # then set SEC_USER_AGENT="Your Name you@example.com"
 ```
@@ -145,10 +161,26 @@ groundcheck pipeline --to generate
 ```
 
 That downloads the eight pinned filings (rate-limited, cached), parses, chunks, builds
-the bge-small FAISS indexes, evaluates retrieval and generates candidates in all three
-modes. Generation is resumable: interrupt it and run the command again. On a fanless
-Air, `make generate` runs it in batches of 5 with a 60-second pause. A free Colab T4
-can do the generation instead (`notebooks/generate_candidates_colab.ipynb`).
+the FAISS indexes for the default retrieval variant (`default` in
+`config/retrieval.yaml`, under `data/index/<embedding>/`), evaluates retrieval and
+generates candidates in all three modes with that retriever. Generation is resumable:
+interrupt it and run the command again. On a fanless Air, `make generate` runs it in
+batches of 5 with a 60-second pause. A free Colab T4 can do the generation instead
+(`notebooks/generate_candidates_colab.ipynb`). `--variant NAME` picks another variant
+for the index, eval-retrieval and generate stages.
+
+**Optional: compare retrieval variants** (dense, contextual headers, hybrid BM25,
+reranker, bge-base). Index every variant, then print one comparison table:
+
+```bash
+groundcheck pipeline --from index --to eval-retrieval --compare
+```
+
+(or `groundcheck index --variant all` and `groundcheck eval-retrieval --compare`). It
+writes `data/eval/results/compare.json` and `compare.md`, prints the recommended default
+(best recall@5, or the fastest variant within 0.05 of it), and `groundcheck report`
+adds the table to docs/RESULTS.md. To adopt it, set `default:` in
+`config/retrieval.yaml`, then run the pipeline again (the index stage re-runs).
 
 Then label (see [docs/labeling_guide.md](docs/labeling_guide.md)):
 

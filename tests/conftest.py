@@ -129,11 +129,13 @@ TINY_CHUNKS = {
 
 @pytest.fixture
 def tiny_corpus(tmp_path):
-    """A labeled company EXCO with four chunks, a hashing-embedder FAISS index, a
+    """A labeled company EXCO with four chunks, a retrieval config whose variants use
+    only offline fakes, a hashing-embedder FAISS index for its default variant, a
     companies config and both question files. Returns a dict of paths."""
     from groundcheck.chunking.base import Chunk, write_chunks
     from groundcheck.retrieval.embedder import HashingEmbedder
-    from groundcheck.retrieval.index import build_company_index
+    from groundcheck.retrieval.retriever import build_variant_index
+    from groundcheck.retrieval.variants import load_retrieval_config
 
     chunks = [
         Chunk(
@@ -152,7 +154,15 @@ def tiny_corpus(tmp_path):
     ]
     chunks_dir, index_dir = tmp_path / "chunks", tmp_path / "index"
     write_chunks(chunks, chunks_dir / "EXCO.jsonl")
-    build_company_index("EXCO", HashingEmbedder(), chunks_dir, index_dir)
+    retrieval_config = tmp_path / "retrieval.yaml"
+    retrieval_config.write_text(
+        "default: dense\npool: 4\nvariants:\n"
+        "  dense: {embedder: hashing}\n"
+        "  hybrid-rerank: {embedder: hashing, headers: true, bm25: true, rerank: overlap}\n"
+        "  bm25: {embedder: null, bm25: true}\n"
+    )
+    spec = load_retrieval_config(retrieval_config).variants["dense"]
+    build_variant_index("dense", spec, "EXCO", HashingEmbedder(), chunks_dir, index_dir)
     config = tmp_path / "companies.yaml"
     config.write_text(
         "companies:\n"
@@ -186,6 +196,7 @@ def tiny_corpus(tmp_path):
         "questions": questions,
         "retrieval": retrieval,
         "llm_config": llm_config,
+        "retrieval_config": retrieval_config,
         "out": tmp_path / "candidates",
     }
 
@@ -199,11 +210,23 @@ def tiny_corpus(tmp_path):
             "--index-dir", str(index_dir),
             "--llm-config", str(llm_config),
             "--out-dir", str(corpus["out"]),
-            "--embedder", "hashing",
+            "--retrieval-config", str(retrieval_config),
             *extra,
         ]  # fmt: skip
 
     corpus["generate_args"] = generate_args
+
+    def retriever(variant: str = "dense", tickers=("EXCO",)):
+        """The configured retriever for this corpus (hashing embedder, offline)."""
+        from groundcheck.retrieval.retriever import open_retriever
+
+        config = load_retrieval_config(retrieval_config)
+        spec = config.variants[variant]
+        return open_retriever(
+            variant, spec, config, list(tickers), chunks_dir, index_dir, embedder=HashingEmbedder()
+        )
+
+    corpus["retriever"] = retriever
     return corpus
 
 

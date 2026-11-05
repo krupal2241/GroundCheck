@@ -14,7 +14,8 @@ from groundcheck.generation.prompts import ANSWER_SYSTEM, CLOSED_BOOK_SYSTEM
 from groundcheck.labeling.plan import load_plan, make_plan
 from groundcheck.labeling.store import LabelStore, load_candidates
 from groundcheck.retrieval.embedder import HashingEmbedder
-from groundcheck.retrieval.index import CompanyIndex, build_company_index
+from groundcheck.retrieval.retriever import build_variant_index
+from groundcheck.retrieval.variants import load_retrieval_config
 from groundcheck.training.data import candidate_chunk_ids
 
 OTHER_TEXT = (
@@ -39,7 +40,16 @@ def two_companies(tiny_corpus):
         chunker="fixed-p250-o50-t120",
     )
     write_chunks([chunk], tiny_corpus["chunks"] / "OTHR.jsonl")
-    build_company_index("OTHR", HashingEmbedder(), tiny_corpus["chunks"], tiny_corpus["index"])
+    config = load_retrieval_config(tiny_corpus["retrieval_config"])
+    for variant in ("dense", "hybrid-rerank"):  # plain and header-embedded indexes
+        build_variant_index(
+            variant, config.variants[variant], "OTHR", HashingEmbedder(),
+            tiny_corpus["chunks"], tiny_corpus["index"],
+        )  # fmt: skip
+        build_variant_index(
+            variant, config.variants[variant], "EXCO", HashingEmbedder(),
+            tiny_corpus["chunks"], tiny_corpus["index"],
+        )  # fmt: skip
     return tiny_corpus
 
 
@@ -77,10 +87,32 @@ def test_modes_append_side_by_side_with_mode_in_id_and_record(two_companies, cap
     assert "Wrote 0 candidate(s)" in capsys.readouterr().out
 
 
-def make_index_retriever(corpus, tickers):
-    embedder = HashingEmbedder()
-    indexes = {t: CompanyIndex.load(t, corpus["chunks"], corpus["index"]) for t in tickers}
-    return lambda t, q, k: indexes[t].search(embedder, q, k)
+@pytest.mark.parametrize("variant", ["hybrid-rerank", "bm25"])
+def test_all_modes_work_with_a_hybrid_or_lexical_retriever(two_companies, variant, capsys):
+    """hybrid-rerank: hashing dense on header text + BM25, RRF, then a reranker; bm25:
+    no dense stage at all. Every mode retrieves with the configured variant, and
+    wrong-context finds the other company through the same retriever."""
+    for mode in ("rag", "no-context", "wrong-context"):
+        args = ["--variant", variant, "--mode", mode, "--wrong-context-source", "other-company"]
+        assert generate(two_companies, *args) == 0
+    out = capsys.readouterr().out
+    assert f"retriever {variant} (" in out
+    found = records(two_companies)
+    assert sorted({r.mode for r in found}) == ["no-context", "rag", "wrong-context"]
+    assert all(r.retrieval.variant == variant for r in found)
+    assert all(r.retrieved for r in found)
+    rag = {r.question_id: r for r in found if r.mode == "rag"}
+    for r in found:
+        assert r.retrieved == rag[r.question_id].retrieved  # same evidence in every mode
+        if r.mode == "wrong-context":
+            assert r.context_source == "other-company:OTHR"
+            assert {c.chunk_id for c in r.context} == {"OTHR-7-p0000"}
+    if variant == "hybrid-rerank":
+        assert "bm25" in found[0].retrieval.retriever and "rerank=" in found[0].retrieval.retriever
+
+
+def make_index_retriever(corpus, tickers, variant="dense"):
+    return corpus["retriever"](variant, tickers).search
 
 
 def test_wrong_context_picker_sources(two_companies):

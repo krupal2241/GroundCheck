@@ -36,6 +36,7 @@ from groundcheck.labeling.store import DEFAULT_EXPORT_PATH, DEFAULT_LABELS_PATH
 from groundcheck.parsing.filing import DEFAULT_PARSED_DIR
 from groundcheck.retrieval.evaluate import DEFAULT_QUESTIONS_PATH
 from groundcheck.retrieval.index import DEFAULT_INDEX_DIR
+from groundcheck.retrieval.variants import DEFAULT_RETRIEVAL_CONFIG_PATH, load_retrieval_config
 from groundcheck.verify.evaluate import DEFAULT_RESULTS_DIR
 
 STAGES: tuple[str, ...] = (
@@ -72,6 +73,7 @@ class Paths:
     gold: Path = DEFAULT_EXPORT_PATH
     results: Path = DEFAULT_RESULTS_DIR
     llm_config: Path | None = None
+    retrieval_config: Path = DEFAULT_RETRIEVAL_CONFIG_PATH
     readme: Path = REPO_ROOT / "README.md"
     docs: Path = REPO_ROOT / "docs"
     state: Path = DEFAULT_STATE_DIR
@@ -103,7 +105,12 @@ class Options:
     force: bool = False
     modes: tuple[str, ...] = MODES
     verifiers: tuple[str, ...] = DEFAULT_VERIFIERS
-    embedder: str = "bge-small"
+    # Retrieval: the variant from config/retrieval.yaml (None: its `default`), and model
+    # overrides that keep the variant's stages (None: the variant's own models).
+    variant: str | None = None
+    compare: bool = False  # index every variant and run eval-retrieval --compare
+    embedder: str | None = None
+    reranker: str | None = None
     tokenizer: str = "bge-small"
     device: str | None = None
     generate_args: tuple[str, ...] = ()  # passed through to generate_candidates.py
@@ -231,8 +238,34 @@ def _tokenizer(ctx: Context) -> str:
     return "none" if ctx.options.dry_run else ctx.options.tokenizer
 
 
-def _embedder(ctx: Context) -> str:
-    return "hashing" if ctx.options.dry_run else ctx.options.embedder
+def _variant(ctx: Context) -> str:
+    """The variant the retrieval stages use: --variant, else the config's default."""
+    return load_retrieval_config(ctx.paths.retrieval_config).get(ctx.options.variant)[0]
+
+
+def _retrieval_args(ctx: Context, variant: str | None = None) -> list[str]:
+    """--retrieval-config, --variant and the model overrides. A dry run swaps in the
+    offline fakes (hashing embedder, overlap reranker) but keeps the variant's stages."""
+    o = ctx.options
+    args = ["--retrieval-config", str(ctx.paths.retrieval_config)]
+    if variant or o.variant:
+        args += ["--variant", variant or o.variant]
+    embedder = "hashing" if o.dry_run else o.embedder
+    reranker = "overlap" if o.dry_run else o.reranker
+    if embedder:
+        args += ["--embedder", embedder]
+    if reranker:
+        args += ["--reranker", reranker]
+    return args
+
+
+def _retrieval_settings(ctx: Context) -> dict:
+    o = ctx.options
+    return {
+        "variant": "all" if o.compare else _variant(ctx),
+        "embedder": "hashing" if o.dry_run else o.embedder,
+        "reranker": "overlap" if o.dry_run else o.reranker,
+    }
 
 
 def _device(ctx: Context) -> list[str]:
@@ -247,17 +280,27 @@ def run_chunk(ctx: Context) -> int:
 
 def run_index(ctx: Context) -> int:
     p = ctx.paths
+    # --compare evaluates every variant, so every variant's index is built (variants that
+    # embed the same texts share one).
+    variant = "all" if ctx.options.compare else None
     return _cli(["index", "--config", str(p.config), "--chunks-dir", str(p.chunks),
-                 "--index-dir", str(p.index), "--embedder", _embedder(ctx),
+                 "--index-dir", str(p.index), *_retrieval_args(ctx, variant),
                  *_device(ctx)])  # fmt: skip
 
 
 def run_eval_retrieval(ctx: Context) -> int:
     p = ctx.paths
-    return _cli(["eval-retrieval", "--questions", str(p.retrieval_questions),
-                 "--chunks-dir", str(p.chunks), "--index-dir", str(p.index),
-                 "--embedder", _embedder(ctx), "--results-dir", str(p.retrieval_results),
-                 *_device(ctx)])  # fmt: skip
+    argv = ["eval-retrieval", "--questions", str(p.retrieval_questions),
+            "--config", str(p.config), "--chunks-dir", str(p.chunks),
+            "--index-dir", str(p.index), "--results-dir", str(p.retrieval_results),
+            *_device(ctx)]  # fmt: skip
+    if ctx.options.compare:
+        if ctx.options.variant:
+            raise ConfigError("--compare runs every configured variant; drop --variant")
+        argv += [*_retrieval_args(ctx), "--compare"]
+    else:
+        argv += _retrieval_args(ctx)
+    return _cli(argv)
 
 
 def run_generate(ctx: Context) -> int:
@@ -267,7 +310,7 @@ def run_generate(ctx: Context) -> int:
     base = ["--config", str(p.config), "--questions", str(p.candidate_questions),
             "--retrieval-questions", str(p.retrieval_questions), "--chunks-dir", str(p.chunks),
             "--index-dir", str(p.index), "--out-dir", str(p.candidates),
-            "--embedder", _embedder(ctx), *_device(ctx)]  # fmt: skip
+            *_retrieval_args(ctx), *_device(ctx)]  # fmt: skip
     if p.llm_config is not None:
         base += ["--llm-config", str(p.llm_config)]
     if ctx.options.dry_run:
@@ -336,19 +379,22 @@ def build_stages() -> dict[str, Stage]:
               run_parse),
         Stage("chunk", lambda c: [c.paths.config, c.paths.parsed], lambda c: [c.paths.chunks],
               run_chunk, lambda c: {"tokenizer": _tokenizer(c)}),
-        Stage("index", lambda c: [c.paths.config, c.paths.chunks], lambda c: [c.paths.index],
-              run_index, lambda c: {"embedder": _embedder(c)}),
+        Stage("index",
+              lambda c: [c.paths.config, c.paths.chunks, c.paths.retrieval_config],
+              lambda c: [c.paths.index], run_index, _retrieval_settings),
         Stage("eval-retrieval",
-              lambda c: [c.paths.retrieval_questions, c.paths.chunks, c.paths.index],
-              lambda c: [c.paths.retrieval_results], run_eval_retrieval,
-              lambda c: {"embedder": _embedder(c)}),
+              lambda c: [c.paths.retrieval_questions, c.paths.chunks, c.paths.index,
+                         c.paths.retrieval_config],
+              lambda c: [c.paths.retrieval_results], run_eval_retrieval, _retrieval_settings),
         Stage("generate",
               lambda c: [c.paths.config, c.paths.candidate_questions,
                          c.paths.retrieval_questions, c.paths.chunks, c.paths.index,
+                         c.paths.retrieval_config,
                          c.paths.llm_config or REPO_ROOT / "config" / "llm.yaml"],
               lambda c: [c.paths.candidates], run_generate,
               lambda c: {"modes": list(c.options.modes), "dry_run": c.options.dry_run,
-                         "args": list(c.options.generate_args)}),
+                         "args": list(c.options.generate_args),
+                         **_retrieval_settings(c), "variant": _variant(c)}),
         Stage("export-labels", lambda c: [c.paths.labels, c.paths.candidates],
               lambda c: [c.paths.gold], run_export_labels),
         Stage("eval-verifiers", lambda c: [c.paths.gold], lambda c: [c.paths.results],

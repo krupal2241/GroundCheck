@@ -169,3 +169,34 @@ def test_dataset_card_balance_table_from_confirmed_labels(results, tiny_corpus, 
     text = card.read_text()
     assert "| rag | 0 | 0 | 2 | 2 |" in text and "TBD" not in text
     assert "| **all** | 0 (0%) | 0 (0%) | 2 (100%) | 2 |" in text
+
+
+def test_compare_json_adds_the_variant_comparison(results, tmp_path):
+    from groundcheck.retrieval.compare import write_comparison
+    from groundcheck.retrieval.evaluate import RetrievalReport
+
+    base = json.loads((results["retrieval"] / "retrieval_hashing-256.json").read_text())
+    reports = {
+        "dense": RetrievalReport.model_validate({**base, "variant": "dense"}),
+        "bm25": RetrievalReport.model_validate(
+            {**base, "variant": "bm25", "overall": {**base["overall"], "mrr": 0.45,
+                                                    "latency_ms": 0.4}}
+        ),
+    }  # fmt: skip
+    write_comparison(reports, [1, 5], results["retrieval"], {"bm25"})
+    readme = tmp_path / "README.md"
+    readme.write_text(README)
+    docs = tmp_path / "docs"
+    outcome = build_report(results["verifier"], results["retrieval"], readme, docs,
+                           plt=StandInPlot())  # fmt: skip
+    assert not any("compare.json" in m for m in outcome.messages)  # not a per-variant report
+    md = (docs / "RESULTS.md").read_text()
+    section = md.split("## Retrieval variant comparison")[1].split("## Verifier comparison")[0]
+    assert "| Variant | R@1 | R@5 | S@1 | S@5 | MRR | ms/query |" in section
+    assert "| `bm25` (diagnostic) | 0.25 | 0.75 | 0.50 | 1.00 | 0.45 | 0.4 |" in section
+    assert "Rule-based recommendation:" in section
+    assert "#### Retrieval variants" in readme.read_text()
+    # Without compare.json there is no comparison section.
+    (results["retrieval"] / "compare.json").unlink()
+    build_report(results["verifier"], results["retrieval"], readme, docs, plt=StandInPlot())
+    assert "Retrieval variant comparison" not in (docs / "RESULTS.md").read_text()
