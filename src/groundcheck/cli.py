@@ -24,6 +24,7 @@ from groundcheck.chunking.base import (
 from groundcheck.chunking.fixed import DEFAULT_MAX_TOKENS, FixedSizeChunker
 from groundcheck.config import (
     DEFAULT_COMPANIES_PATH,
+    REPO_ROOT,
     ConfigError,
     get_sec_user_agent,
     load_companies,
@@ -32,6 +33,7 @@ from groundcheck.config import (
 from groundcheck.edgar.client import SecClient, SecRequestError
 from groundcheck.edgar.download import DEFAULT_RAW_DIR, download_all, resolve_latest_10k
 from groundcheck.generation.pipeline import DEFAULT_CANDIDATES_DIR
+from groundcheck.labeling.plan import DEFAULT_PLAN_PATH, balance_table, load_plan, make_plan
 from groundcheck.labeling.report import check_labels, export_labels, label_stats
 from groundcheck.labeling.session import Labeler
 from groundcheck.labeling.store import (
@@ -61,7 +63,7 @@ from groundcheck.retrieval.evaluate import (
 )
 from groundcheck.retrieval.index import DEFAULT_INDEX_DIR
 from groundcheck.retrieval.rerank import RERANKERS, make_reranker
-from groundcheck.retrieval.retriever import build_variant_index, open_retriever
+from groundcheck.retrieval.retriever import build_variant_index, open_retriever, searchable
 from groundcheck.retrieval.variants import (
     DEFAULT_RETRIEVAL_CONFIG_PATH,
     RetrievalConfig,
@@ -70,6 +72,17 @@ from groundcheck.retrieval.variants import (
     load_retrieval_config,
     model_text,
 )
+from groundcheck.training.data import (
+    DEFAULT_TRAINING_CONFIG,
+    DEFAULT_TRAINING_DIR,
+    build_training_data,
+    load_training_config,
+)
+from groundcheck.verify.base import VerifierError
+from groundcheck.verify.costs import DEFAULT_PRICES_PATH, load_prices
+from groundcheck.verify.errors import error_report
+from groundcheck.verify.evaluate import DEFAULT_RESULTS_DIR, evaluate_verifiers, load_gold
+from groundcheck.verify.factory import VERIFIER_NAMES, VerifierOptions, make_verifier
 
 
 def cmd_resolve_filings(args: argparse.Namespace) -> int:
@@ -368,11 +381,65 @@ def _candidates(args: argparse.Namespace):
 def cmd_label(args: argparse.Namespace) -> int:
     candidates = _candidates(args)
     store = LabelStore(args.labels)
+    if args.plan:
+        ids = load_plan(args.plan)
+        by_id = {c.candidate_id: c for c in candidates}
+        missing = [i for i in ids if i not in by_id]
+        if missing:
+            raise ConfigError(
+                f"{len(missing)} planned candidate(s) not in {args.candidates_dir} "
+                f"(first: {missing[0]}); was the plan made from other candidates?"
+            )
+        candidates = [by_id[i] for i in ids]
+        print(f"Plan {args.plan}: {len(candidates)} candidate(s), in plan order.")
     items = claim_items(candidates)
     done = sum(store.get(i.claim.claim_id) is not None for i in items)
     print(f"{len(items)} claim(s) in {len(candidates)} candidate(s); {done} already labeled.")
     print("Paste evidence exactly as shown; finish a paste with an empty line. q quits.")
-    Labeler(store).run(items, only_unlabeled=args.only_unlabeled)
+    suggester = None
+    if args.suggest:
+        from groundcheck.labeling.assist import verifier_suggester
+
+        # Local models only: allow_paid is never passed through here.
+        options = VerifierOptions(
+            llm_config=args.llm_config,
+            allow_paid=False,
+            device=args.device,
+            finetuned_path=args.finetuned_path,
+        )
+        suggester = verifier_suggester(make_verifier(args.suggest, options))
+        print(
+            f"Label suggestions ON ({args.suggest}). Each label records what was suggested "
+            "and whether you agreed; see docs/labeling_guide.md on anchoring."
+        )
+    labeler = Labeler(
+        store, suggest_evidence=not args.no_evidence_suggest, label_suggester=suggester
+    )
+    labeler.run(items, only_unlabeled=args.only_unlabeled)
+    return 0
+
+
+def cmd_label_plan(args: argparse.Namespace) -> int:
+    candidates = _candidates(args)
+    labeled = set(LabelStore(args.labels).records) if args.labels.is_file() else set()
+    plan = make_plan(candidates, args.questions, args.claims, args.seed, labeled)
+    by_id = {c.candidate_id: c for c in candidates}
+    chosen = [by_id[i] for i in plan.candidate_ids]
+    n_claims = sum(len(c.claims) for c in chosen)
+    target = ", ".join(f"{k} {v}" for k, v in plan.target.items())
+    print(
+        f"Plan: {len(chosen)} candidate(s), {n_claims} claim(s) (target: {target}; "
+        f"{len(labeled)} claim(s) already labeled count towards the balance)"
+    )
+    if not plan.reached:
+        print("WARNING: not enough unlabeled candidates with claims to reach the target.")
+    print(balance_table(chosen, "claims"))
+    if args.dry_run:
+        print("--dry-run: plan not written.")
+        return 0
+    args.out.parent.mkdir(parents=True, exist_ok=True)
+    args.out.write_text(plan.to_json(candidates))
+    print(f"Wrote {args.out}; label it with: groundcheck label --plan {args.out}")
     return 0
 
 
@@ -389,7 +456,11 @@ def cmd_label_check(args: argparse.Namespace) -> int:
     for problem in problems:
         print(f"ERROR: {problem}")
     status = "OK" if not problems else f"{len(problems)} problem(s)"
-    print(f"{len(records)} valid label record(s) in {args.labels}; {status}")
+    invalid = sum(r.invalid for r in records)
+    print(
+        f"{len(records)} valid label record(s) in {args.labels} ({invalid} marked invalid); "
+        f"{status}"
+    )
     return 1 if problems else 0
 
 
@@ -402,11 +473,281 @@ def cmd_export_labels(args: argparse.Namespace) -> int:
         print("Nothing exported: fix these first (`groundcheck label-check`).")
         return 1
     n = export_labels(records, candidates, args.out)
+    invalid = sum(r.invalid for r in records)
     print(
         f"Exported {n} confirmed label(s) to {args.out}; "
-        f"{len(records) - n} unconfirmed label(s) left out."
+        f"{len(records) - n - invalid} unconfirmed label(s) and {invalid} invalid claim(s) "
+        "left out."
     )
     return 0
+
+
+def verifier_options(args: argparse.Namespace) -> VerifierOptions:
+    return VerifierOptions(
+        llm_config=args.llm_config,
+        provider=args.provider,
+        llm_model=args.model,
+        allow_paid=args.allow_paid,
+        use_cache=args.use_cache,
+        model=args.hf_model,
+        revision=args.revision,
+        device=args.device,
+        threshold=args.threshold,
+        finetuned_path=args.finetuned_path,
+    )
+
+
+def cmd_eval_verifiers(args: argparse.Namespace) -> int:
+    gold = load_gold(args.gold)
+    if args.company:
+        gold = [g for g in gold if g.ticker in args.company]
+    if args.limit is not None:
+        gold = gold[: args.limit]
+    if not gold:
+        raise ConfigError("no gold labels left after --company/--limit")
+    if args.hf_model and len(args.verifier) > 1:
+        raise ConfigError("--hf-model applies to one verifier; run them one at a time")
+    options = verifier_options(args)
+    prices = load_prices(args.prices)
+    print(f"{len(gold)} gold claim(s) from {args.gold}")
+    evaluate_verifiers(
+        args.verifier,
+        lambda name: make_verifier(name, options),
+        gold,
+        args.gold,
+        args.results_dir,
+        prices,
+    )
+    print(f"Wrote {args.results_dir / 'verifier_eval.json'} and verifier_eval.md")
+    print(f"Per-claim predictions: {args.results_dir / 'predictions'}/")
+    return 0
+
+
+def cmd_error_report(args: argparse.Namespace) -> int:
+    gold = load_gold(args.gold)
+    text = error_report(args.results_dir, gold, args.gold, args.verifier)
+    out = args.out or args.results_dir / "error_report.md"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(text)
+    print(f"Wrote {out}")
+    return 0
+
+
+DEMO_VERIFIERS = ["prompted", "hhem", "minicheck", "fake"]
+
+
+def cmd_demo(args: argparse.Namespace) -> int:
+    from groundcheck.demo.app import DemoPipeline, build_app
+    from groundcheck.generation.pipeline import RetrievalInfo
+    from groundcheck.generation.prompts import fake_responder
+    from groundcheck.retrieval.index import file_sha256
+
+    companies = load_companies(args.config)
+    retrieval = _retrieval_config(args)
+    name, spec = _variant(args, retrieval)
+    embedder = make_embedder(spec.embedder, args.device) if spec.embedder else None
+    tickers = args.company or [
+        c.ticker
+        for c in companies.companies
+        if searchable(c.ticker, spec, embedder, args.chunks_dir, args.index_dir)
+    ]
+    if not tickers:
+        raise ConfigError(
+            f"no company has an index for retrieval variant {name!r} in {args.index_dir}; "
+            f"run `groundcheck index --variant {name}`"
+        )
+    verifiers = args.verifiers or (["fake"] if args.dry_run else list(DEMO_VERIFIERS))
+    if args.finetuned_path and "finetuned" not in verifiers:
+        verifiers.append("finetuned")
+    llm_config = load_llm_config(args.llm_config)
+    if args.dry_run:
+        provider = make_provider(llm_config, "fake", use_cache=False, responder=fake_responder)
+    else:
+        provider = make_provider(llm_config, args.provider, args.model, allow_paid=args.allow_paid)
+    retriever = _open_retriever(args, retrieval, name, spec, tickers, embedder=embedder)
+
+    def retrieval_info(ticker: str) -> RetrievalInfo:
+        return RetrievalInfo(
+            embedder=embedder.name if embedder is not None else "none",
+            chunker=retriever.chunker(ticker),
+            top_k=llm_config.top_k,
+            chunks_sha256=file_sha256(chunks_path(ticker, args.chunks_dir)),
+            variant=name,
+            retriever=retriever.description,
+        )
+
+    options = verifier_options(args)
+    if args.dry_run:
+        options.provider = "fake"
+    pipeline = DemoPipeline(
+        provider, retriever.search, retrieval_info, llm_config, lambda n: make_verifier(n, options)
+    )
+    app = build_app(pipeline, tickers, verifiers)
+    identity = provider.identity()
+    print(
+        f"GroundCheck demo: {identity.provider} {identity.model}, retriever {name} "
+        f"({retriever.description}), "
+        f"companies {', '.join(tickers)}, verifiers {', '.join(verifiers)}"
+    )
+    print(f"Open http://{args.host}:{args.port} (Ctrl-C to stop)")
+    app.launch(server_name=args.host, server_port=args.port, share=False)
+    return 0
+
+
+MIN_TRAINING_EXAMPLES = 500
+
+
+def cmd_build_training_data(args: argparse.Namespace) -> int:
+    config = load_training_config(args.training_config)
+    gold_paths = [args.gold, args.labels]
+    manifest = build_training_data(
+        args.chunks_dir, args.out_dir, config, gold_paths, args.candidates_dir
+    )
+    for problem in manifest["companies_in_config_without_chunks"]:
+        print(f"WARNING: {problem} is in {args.training_config or 'config/training.yaml'} "
+              "but has no chunks")  # fmt: skip
+    if not (manifest["gold_claims_excluded"] or manifest["candidate_chunks_excluded"]):
+        print(
+            "WARNING: found no gold labels, label file or candidates to exclude. That is "
+            "only right if nothing has been labeled yet; otherwise check --gold, --labels "
+            "and --candidates-dir before training."
+        )
+    print(
+        f"Excluded {manifest['gold_claims_excluded']} gold claim(s), "
+        f"{manifest['gold_chunks_excluded']} gold chunk(s) and "
+        f"{manifest['candidate_chunks_excluded']} other candidate chunk(s)."
+    )
+    for split, counts in manifest["counts_by_split_and_label"].items():
+        total = sum(counts.values())
+        detail = ", ".join(f"{k} {v}" for k, v in sorted(counts.items()))
+        print(f"  {split:<5} {total:>6} example(s)  {detail}")
+    print(f"By rule: {manifest['counts_by_rule']}")
+    n_train = sum(manifest["counts_by_split_and_label"].get("train", {}).values())
+    if n_train < MIN_TRAINING_EXAMPLES:
+        print(
+            f"WARNING: only {n_train} training example(s) (fewer than "
+            f"{MIN_TRAINING_EXAMPLES}). A verifier fine-tuned on this few will be weak; "
+            "add companies to the train split or raise max_seeds_per_company."
+        )
+    print(f"Wrote {args.out_dir}/{{train,dev,test}}.jsonl and manifest.json")
+    return 0
+
+
+def cmd_report(args: argparse.Namespace) -> int:
+    from groundcheck.report.build import build_report
+
+    outcome = build_report(
+        args.results_dir,
+        args.retrieval_results_dir,
+        readme=args.readme,
+        docs_dir=args.docs_dir,
+        labels_path=args.labels,
+        candidates_dir=args.candidates_dir,
+    )
+    for item in outcome.missing:
+        print(f"MISSING: {item}")
+    for message in outcome.messages:
+        print(message)
+    print(
+        f"Wrote {outcome.results_md}"
+        + (f" and {len(outcome.figures)} chart(s)" if outcome.figures else "")
+    )
+    print("README.md results section " + ("updated." if outcome.readme_updated else "NOT changed."))
+    return 0
+
+
+def cmd_pipeline(args: argparse.Namespace) -> int:
+    from groundcheck.pipeline.runner import (
+        DRY_RUN_DIR,
+        STAGES,
+        Context,
+        Options,
+        Paths,
+        format_summary,
+        run_pipeline,
+    )
+
+    if args.list:
+        print("Stages, in order: " + " -> ".join(STAGES))
+        return 0
+    paths = Paths.dry_run(args.scratch_dir or DRY_RUN_DIR) if args.dry_run else Paths()
+    if args.retrieval_config is not None:
+        paths.retrieval_config = args.retrieval_config
+    options = Options(
+        dry_run=args.dry_run,
+        force=args.force,
+        modes=tuple(args.modes),
+        verifiers=tuple(args.verifiers),
+        variant=args.variant,
+        compare=args.compare,
+        embedder=args.embedder,
+        reranker=args.reranker,
+        tokenizer=args.tokenizer,
+        device=args.device,
+        generate_args=tuple(args.generate_arg or ()),
+    )
+    where = f"scratch directory {paths.raw.parent}" if args.dry_run else "the repository"
+    print(f"Pipeline ({'DRY RUN, fakes only' if args.dry_run else 'real'}), writing to {where}")
+    result = run_pipeline(Context(paths, options), args.from_stage, args.to_stage)
+    print(format_summary(result))
+    return 0 if result.ok else 1
+
+
+def add_retrieval_options(parser: argparse.ArgumentParser) -> None:
+    """Which retrieval variant to open, and where its chunks and indexes are."""
+    parser.add_argument("--config", type=Path, default=DEFAULT_COMPANIES_PATH)
+    parser.add_argument("--chunks-dir", type=Path, default=DEFAULT_CHUNKS_DIR)
+    parser.add_argument("--index-dir", type=Path, default=DEFAULT_INDEX_DIR)
+    parser.add_argument(
+        "--retrieval-config",
+        type=Path,
+        default=DEFAULT_RETRIEVAL_CONFIG_PATH,
+        help="retrieval variants (default: config/retrieval.yaml)",
+    )
+    parser.add_argument(
+        "--variant", default=None, help="retrieval variant (default: `default` in the config)"
+    )
+    parser.add_argument(
+        "--embedder",
+        choices=list(EMBEDDERS),
+        default=None,
+        help="override the variant's embedder (hashing: offline fake, for smoke runs)",
+    )
+    parser.add_argument(
+        "--reranker",
+        choices=list(RERANKERS),
+        default=None,
+        help="override the variant's reranker (overlap: offline fake)",
+    )
+
+
+def add_verifier_options(parser: argparse.ArgumentParser) -> None:
+    """Options for building verifiers (and the prompted verifier's LLM)."""
+    add_llm_options(parser)
+    parser.add_argument(
+        "--use-cache",
+        action="store_true",
+        help="prompted: reuse cached LLM replies (off by default: latency would be meaningless)",
+    )
+    parser.add_argument(
+        "--hf-model", default=None, help="minicheck/hhem: a different Hugging Face model ID"
+    )
+    parser.add_argument("--revision", default=None, help="minicheck/hhem: pin a Hub commit")
+    parser.add_argument(
+        "--device", default=None, help="cpu, mps or cuda (default: cuda, else mps, else cpu)"
+    )
+    parser.add_argument(
+        "--threshold",
+        type=float,
+        default=0.5,
+        help="binary verifiers: P(supported) needed to say supported (default 0.5)",
+    )
+    parser.add_argument(
+        "--finetuned-path",
+        type=Path,
+        default=None,
+        help="finetuned: the model directory written by scripts/train_verifier.py",
+    )
 
 
 def add_llm_options(parser: argparse.ArgumentParser) -> None:
@@ -495,30 +836,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     # Options shared by the commands that embed text or retrieve.
     embed_options = argparse.ArgumentParser(add_help=False)
-    embed_options.add_argument("--config", type=Path, default=DEFAULT_COMPANIES_PATH)
-    embed_options.add_argument("--chunks-dir", type=Path, default=DEFAULT_CHUNKS_DIR)
-    embed_options.add_argument("--index-dir", type=Path, default=DEFAULT_INDEX_DIR)
-    embed_options.add_argument(
-        "--retrieval-config",
-        type=Path,
-        default=DEFAULT_RETRIEVAL_CONFIG_PATH,
-        help="retrieval variants (default: config/retrieval.yaml)",
-    )
-    embed_options.add_argument(
-        "--variant", default=None, help="retrieval variant (default: `default` in the config)"
-    )
-    embed_options.add_argument(
-        "--embedder",
-        choices=list(EMBEDDERS),
-        default=None,
-        help="override the variant's embedder (hashing: offline fake, for smoke runs)",
-    )
-    embed_options.add_argument(
-        "--reranker",
-        choices=list(RERANKERS),
-        default=None,
-        help="override the variant's reranker (overlap: offline fake)",
-    )
+    add_retrieval_options(embed_options)
     embed_options.add_argument(
         "--device", default=None, help="cpu or mps (default: mps if available, else cpu)"
     )
@@ -588,12 +906,47 @@ def build_parser() -> argparse.ArgumentParser:
     label.add_argument(
         "--only-unlabeled", action="store_true", help="skip claims that already have a label"
     )
+    label.add_argument(
+        "--plan",
+        type=Path,
+        default=None,
+        help="walk through exactly the candidates of a plan from `groundcheck label-plan`",
+    )
+    label.add_argument(
+        "--suggest",
+        choices=VERIFIER_NAMES,
+        default=None,
+        help="show this local verifier's proposed label before you decide (OFF by "
+        "default: a suggestion can anchor you; every label records whether one was shown)",
+    )
+    label.add_argument(
+        "--no-evidence-suggest",
+        action="store_true",
+        help="don't offer the best-matching sentence or table row as evidence",
+    )
+    label.add_argument("--llm-config", type=Path, default=None, help="--suggest prompted")
+    label.add_argument("--device", default=None, help="--suggest minicheck/hhem/finetuned")
+    label.add_argument("--finetuned-path", type=Path, default=None, help="--suggest finetuned")
     label.set_defaults(func=cmd_label)
+
+    plan = subparsers.add_parser(
+        "label-plan",
+        parents=[label_options],
+        help="propose a sample balanced across companies, question types and modes",
+    )
+    target = plan.add_mutually_exclusive_group(required=True)
+    target.add_argument("--questions", type=int, help="number of candidate answers to plan")
+    target.add_argument("--claims", type=int, help="number of claims to plan")
+    plan.add_argument("--company", nargs="+", metavar="TICKER", help="limit to tickers")
+    plan.add_argument("--seed", type=int, default=0, help="tie-break seed (default 0)")
+    plan.add_argument("--out", type=Path, default=DEFAULT_PLAN_PATH)
+    plan.add_argument("--dry-run", action="store_true", help="print the plan, write nothing")
+    plan.set_defaults(func=cmd_label_plan)
 
     stats = subparsers.add_parser(
         "label-stats",
         parents=[label_options],
-        help="label counts by label, company, question type and edge case",
+        help="label counts by label, mode, company, question type and edge case",
     )
     stats.add_argument("--company", nargs="+", metavar="TICKER", help="limit to tickers")
     stats.set_defaults(func=cmd_label_stats)
@@ -610,6 +963,166 @@ def build_parser() -> argparse.ArgumentParser:
     )
     export.add_argument("--out", type=Path, default=DEFAULT_EXPORT_PATH)
     export.set_defaults(func=cmd_export_labels)
+
+    eval_verifiers = subparsers.add_parser(
+        "eval-verifiers",
+        help="run verifiers over the confirmed gold labels; write results/verifier_eval.*",
+    )
+    eval_verifiers.add_argument(
+        "--verifier",
+        nargs="+",
+        required=True,
+        choices=VERIFIER_NAMES,
+        help="one or more verifiers, run one after another",
+    )
+    eval_verifiers.add_argument("--gold", type=Path, default=DEFAULT_EXPORT_PATH)
+    eval_verifiers.add_argument("--company", nargs="+", metavar="TICKER", help="limit to tickers")
+    eval_verifiers.add_argument("--limit", type=int, default=None, help="first N claims only")
+    eval_verifiers.add_argument("--results-dir", type=Path, default=DEFAULT_RESULTS_DIR)
+    eval_verifiers.add_argument(
+        "--prices",
+        type=Path,
+        default=None,
+        help=f"hosted prices for the cost ESTIMATE (default {DEFAULT_PRICES_PATH.name})",
+    )
+    add_verifier_options(eval_verifiers)
+    eval_verifiers.set_defaults(func=cmd_eval_verifiers)
+
+    errors = subparsers.add_parser(
+        "error-report",
+        help="misclassified claims per verifier, by edge-case tag (results/error_report.md)",
+    )
+    errors.add_argument(
+        "--verifier", nargs="+", default=None, help="default: every verifier with predictions"
+    )
+    errors.add_argument("--gold", type=Path, default=DEFAULT_EXPORT_PATH)
+    errors.add_argument("--results-dir", type=Path, default=DEFAULT_RESULTS_DIR)
+    errors.add_argument(
+        "--out", type=Path, default=None, help="default: <results-dir>/error_report.md"
+    )
+    errors.set_defaults(func=cmd_error_report)
+
+    demo = subparsers.add_parser(
+        "demo",
+        help="local Gradio demo: ask, retrieve, answer, verify each claim ([demo] extra)",
+    )
+    add_retrieval_options(demo)
+    demo.add_argument(
+        "--company", nargs="+", metavar="TICKER", help="default: every company with an index"
+    )
+    demo.add_argument(
+        "--verifiers",
+        nargs="+",
+        choices=VERIFIER_NAMES,
+        default=None,
+        help=f"verifiers to offer (default: {' '.join(DEMO_VERIFIERS)}; fake with --dry-run)",
+    )
+    demo.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="fake LLM (answers with the top passage's first sentence); no Ollama needed",
+    )
+    demo.add_argument("--host", default="127.0.0.1")
+    demo.add_argument("--port", type=int, default=7860)
+    add_verifier_options(demo)
+    demo.set_defaults(func=cmd_demo)
+
+    training = subparsers.add_parser(
+        "build-training-data",
+        help="synthetic verifier training data from chunks (gold set excluded, split by company)",
+    )
+    training.add_argument("--chunks-dir", type=Path, default=DEFAULT_CHUNKS_DIR)
+    training.add_argument("--out-dir", type=Path, default=DEFAULT_TRAINING_DIR)
+    training.add_argument(
+        "--training-config",
+        type=Path,
+        default=None,
+        help=f"splits and sizes (default {DEFAULT_TRAINING_CONFIG.name})",
+    )
+    training.add_argument(
+        "--gold", type=Path, default=DEFAULT_EXPORT_PATH, help="gold labels to exclude"
+    )
+    training.add_argument(
+        "--labels", type=Path, default=DEFAULT_LABELS_PATH, help="label file to exclude too"
+    )
+    training.add_argument(
+        "--candidates-dir",
+        type=Path,
+        default=DEFAULT_CANDIDATES_DIR,
+        help="every chunk retrieved for a candidate is excluded as well",
+    )
+    training.set_defaults(func=cmd_build_training_data)
+
+    report = subparsers.add_parser(
+        "report",
+        help="regenerate README results, docs/RESULTS.md and charts from the result files",
+    )
+    report.add_argument("--results-dir", type=Path, default=DEFAULT_RESULTS_DIR)
+    report.add_argument(
+        "--retrieval-results-dir", type=Path, default=DEFAULT_QUESTIONS_PATH.parent / "results"
+    )
+    report.add_argument("--readme", type=Path, default=REPO_ROOT / "README.md")
+    report.add_argument("--docs-dir", type=Path, default=REPO_ROOT / "docs")
+    report.add_argument("--labels", type=Path, default=DEFAULT_LABELS_PATH)
+    report.add_argument("--candidates-dir", type=Path, default=DEFAULT_CANDIDATES_DIR)
+    report.set_defaults(func=cmd_report)
+
+    from groundcheck.generation.modes import MODES
+    from groundcheck.pipeline.runner import DEFAULT_VERIFIERS, STAGES
+
+    pipeline = subparsers.add_parser(
+        "pipeline",
+        help="run every stage (download ... report), skipping stages whose inputs are unchanged",
+    )
+    pipeline.add_argument("--from", dest="from_stage", choices=STAGES, default=None)
+    pipeline.add_argument("--to", dest="to_stage", choices=STAGES, default=None)
+    pipeline.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="offline: fake SEC client, hashing embedder, fake LLM and verifier; writes "
+        "only to a scratch directory",
+    )
+    pipeline.add_argument(
+        "--scratch-dir", type=Path, default=None, help="dry run output (default data/cache/...)"
+    )
+    pipeline.add_argument("--force", action="store_true", help="re-run even unchanged stages")
+    pipeline.add_argument("--list", action="store_true", help="list the stages and exit")
+    pipeline.add_argument("--modes", nargs="+", choices=MODES, default=list(MODES))
+    pipeline.add_argument(
+        "--verifiers", nargs="+", choices=VERIFIER_NAMES, default=list(DEFAULT_VERIFIERS)
+    )
+    pipeline.add_argument(
+        "--variant",
+        default=None,
+        help="retrieval variant for index, eval-retrieval and generate (default: `default` "
+        "in config/retrieval.yaml)",
+    )
+    pipeline.add_argument(
+        "--compare",
+        action="store_true",
+        help="index every variant and run eval-retrieval --compare (compare.json/.md)",
+    )
+    pipeline.add_argument(
+        "--retrieval-config", type=Path, default=None, help="default: config/retrieval.yaml"
+    )
+    pipeline.add_argument(
+        "--embedder", choices=list(EMBEDDERS), default=None,
+        help="override the variant's embedder (default: the variant's own)",
+    )  # fmt: skip
+    pipeline.add_argument(
+        "--reranker", choices=list(RERANKERS), default=None,
+        help="override the variant's reranker (default: the variant's own)",
+    )  # fmt: skip
+    pipeline.add_argument("--tokenizer", choices=["bge-small", "none"], default="bge-small")
+    pipeline.add_argument("--device", default=None)
+    pipeline.add_argument(
+        "--generate-arg",
+        action="append",
+        metavar="ARG",
+        help="extra argument for generate_candidates.py, e.g. --generate-arg=--limit "
+        "--generate-arg=5 (repeatable)",
+    )
+    pipeline.set_defaults(func=cmd_pipeline)
     return parser
 
 
@@ -625,7 +1138,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     try:
         return args.func(args)
-    except (ConfigError, SecRequestError, LLMError) as exc:
+    except (ConfigError, SecRequestError, LLMError, VerifierError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 

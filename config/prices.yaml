@@ -1,0 +1,20 @@
+# Hosted-model prices for the cost ESTIMATE printed by `groundcheck eval-verifiers`.
+#
+# Fill these in yourself from each provider's public price page. Nothing here is ever
+# called: no API key is read and no request is sent. The estimate is pure arithmetic,
+#   cost per 1,000 checks = 1,000 x (input tokens x input price + output tokens x output price)
+# and every report labels it as an ESTIMATE. Leave `models` empty to skip it.
+#
+# Input tokens per check: the prompted verifier's full prompt (system + few-shot rules +
+# the retrieved passages + the claim) for each evaluated claim, counted with the rough
+# rule 1 token ~ 4 characters (see docs/DESIGN.md). Output tokens per check: measured
+# from the local prompted verifier when it ran in the same report, else the value below.
+
+currency: USD
+assumed_output_tokens: 60
+
+models: []
+# models:
+#   - name: example-hosted-model        # any label; shown in the report
+#     input_per_million_tokens: 0.00    # price per 1,000,000 input tokens
+#     output_per_million_tokens: 0.00   # price per 1,000,000 output tokens

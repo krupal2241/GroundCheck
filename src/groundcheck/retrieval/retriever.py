@@ -161,6 +161,18 @@ def variant_index_dir(index_dir: Path, embedder: Embedder, spec: VariantSpec) ->
     return index_dir / index_folder_name(embedding_key(embedder.name, spec.headers))
 
 
+def searchable(
+    ticker: str, spec: VariantSpec, embedder: Embedder | None, chunks_dir: Path, index_dir: Path
+) -> bool:
+    """Whether the variant can search `ticker` as things stand (nothing is built): its
+    chunks exist and, if it has a dense stage, so does its index for this embedding."""
+    if not chunks_path(ticker, chunks_dir).is_file():
+        return False
+    if embedder is None or spec.embedder is None:  # BM25 alone: built in memory
+        return True
+    return (variant_index_dir(index_dir, embedder, spec) / ticker / "meta.json").is_file()
+
+
 def build_variant_index(
     name: str,
     spec: VariantSpec,

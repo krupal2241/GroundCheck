@@ -14,6 +14,10 @@ Why one index per company: every question is about one filing, so searching only
 filing's index gives it the full `top_k` from the right 10-K, and a similar sentence
 in another company's filing can never crowd it out.
 
+`faiss` is imported only when an index is built or loaded, so commands that never touch
+an index (e.g. `eval-verifiers`) don't load it. On macOS, faiss and torch each bring an
+OpenMP runtime, and loading both into one process can abort it (docs/DESIGN.md, Part 0).
+
 The meta file makes stale indexes loud: loading fails if the chunks file has changed
 since the index was built, if the texts a variant would embed (e.g. with or without
 contextual headers) differ from the ones that were embedded, or if the query embedder
@@ -24,8 +28,8 @@ import hashlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
-import faiss
 import numpy as np
 
 from groundcheck.chunking.base import Chunk, chunks_path, read_chunks
@@ -33,7 +37,16 @@ from groundcheck.config import REPO_ROOT, ConfigError
 from groundcheck.retrieval.embedder import Embedder
 from groundcheck.retrieval.variants import texts_sha256
 
+if TYPE_CHECKING:
+    import faiss
+
 DEFAULT_INDEX_DIR = REPO_ROOT / "data" / "index"
+
+
+def _faiss() -> Any:
+    import faiss
+
+    return faiss
 
 
 @dataclass
@@ -47,9 +60,9 @@ def file_sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def build_index(vectors: np.ndarray) -> faiss.IndexFlatIP:
+def build_index(vectors: np.ndarray) -> "faiss.IndexFlatIP":
     vectors = np.ascontiguousarray(vectors, dtype=np.float32)
-    index = faiss.IndexFlatIP(vectors.shape[1])
+    index = _faiss().IndexFlatIP(vectors.shape[1])
     index.add(vectors)
     return index
 
@@ -80,7 +93,7 @@ def build_company_index(
     index = build_index(vectors)
     out = index_dir / ticker
     out.mkdir(parents=True, exist_ok=True)
-    faiss.write_index(index, str(out / "index.faiss"))
+    _faiss().write_index(index, str(out / "index.faiss"))
     meta = {
         "ticker": ticker,
         "embedder": embedder.name,
@@ -103,7 +116,7 @@ class CompanyIndex:
     def __init__(
         self,
         ticker: str,
-        index: faiss.Index,
+        index: "faiss.Index",
         chunks: list[Chunk],
         embedder_name: str,
         meta: dict | None = None,
@@ -154,7 +167,7 @@ class CompanyIndex:
             )
         by_id = {c.chunk_id: c for c in read_chunks(source)}
         chunks = [by_id[i] for i in meta["chunk_ids"]]
-        index = faiss.read_index(str(folder / "index.faiss"))
+        index = _faiss().read_index(str(folder / "index.faiss"))
         return cls(ticker, index, chunks, meta["embedder"], meta)
 
     def search(self, embedder: Embedder, query: str, k: int = 10) -> list[Hit]:

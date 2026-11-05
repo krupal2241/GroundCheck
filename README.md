@@ -1,34 +1,114 @@
 # GroundCheck
 
-Claim-level hallucination verification for retrieval-augmented generation (RAG).
+Claim-level hallucination checking for retrieval-augmented generation (RAG) over SEC
+10-K filings, built and benchmarked on a laptop for $0.
 
-Given an LLM answer and the source passages it was generated from, GroundCheck splits
-the answer into atomic claims and labels each one **supported**, **contradicted**, or
-**unsupported**, citing the evidence sentence. The corpus is SEC 10-K filings: long
-documents with messy tables and lots of numbers, which is where RAG answers tend to go
-wrong.
+## The problem
 
-> **Status:** Weeks 1–2 in progress. Building the RAG baseline and the labeling tooling.
-> No verifier model yet. See [docs/PLAN.md](docs/PLAN.md).
+A RAG system answers questions from retrieved passages, but the answer can still say
+things the passages don't: a number from the wrong year, a value off by a factor of a
+thousand, a fact about the wrong segment, or a confident figure with no source at all.
+On financial filings these mistakes are frequent and costly, because answers are dense
+with numbers and the evidence often sits in tables. GroundCheck splits each answer into
+atomic claims and labels every claim **supported**, **contradicted** or
+**unsupported** by the retrieved passages, citing the evidence span. It provides a
+hand-labeled, claim-level test set built from real model answers over eight 10-Ks, and
+a benchmark of verifiers on it: a prompted local LLM judge, MiniCheck, HHEM and a small
+fine-tuned model, compared on accuracy, latency and cost per 1,000 checks.
 
-## Project goals
+> **Status:** the full pipeline, labeling tools, verifiers, evaluation, report generator
+> and demo are built and tested offline. **No benchmark numbers yet:** they appear below
+> only after real runs on the hand-labeled set (`groundcheck report` fills them in).
 
-1. A RAG baseline over 10-K filings (EDGAR download → parse → chunk → retrieve → answer).
-2. A hand-labeled, claim-level test set (every label confirmed by a human).
-3. A fine-tuned small verifier, benchmarked against a prompted frontier-model judge and
-   open verifiers (MiniCheck, HHEM) on accuracy, latency, and cost per 1,000 checks.
+## Architecture
 
-The project runs on a $0 budget: generation uses local models through Ollama, and any
-paid API call is refused unless you explicitly pass `--allow-paid`.
+```mermaid
+flowchart LR
+    subgraph Data["Corpus ($0, local)"]
+        A[SEC EDGAR<br/>8 pinned 10-Ks] -->|download, rate-limited| B[parse<br/>Items 1, 1A, 7, 8<br/>tables as rows]
+        B --> C[chunk<br/>prose 250 words<br/>tables by row]
+        C --> D[index<br/>retrieval variant: bge-small FAISS<br/>+ BM25 hybrid by default<br/>one per company]
+    end
+    subgraph Gen["Candidate generation (Ollama llama3.2:3b)"]
+        Q[60 questions<br/>6 types] --> R[retrieve top-5<br/>configured variant]
+        D --> R
+        R --> M{mode}
+        M -->|rag| ANS[answer]
+        M -->|no-context| ANS
+        M -->|wrong-context:<br/>other company / Item| ANS
+        ANS --> S[split into claims<br/>few-shot prompt +<br/>deterministic validator]
+    end
+    subgraph Label["Hand labeling"]
+        S --> P[label-plan<br/>balanced sample]
+        P --> L[label CLI<br/>S / C / U + evidence span<br/>x = invalid claim]
+        L --> G[(gold_labels.jsonl<br/>confirmed only)]
+    end
+    subgraph Eval["Benchmark"]
+        G --> V1[prompted LLM judge]
+        G --> V2[MiniCheck]
+        G --> V3[HHEM]
+        G --> V4[fine-tuned DeBERTa-v3-small]
+        C -->|synthetic perturbations,<br/>gold chunks excluded,<br/>split by company| T[training data] --> V4
+        V1 & V2 & V3 & V4 --> E[eval-verifiers<br/>accuracy, macro-F1,<br/>latency, cost]
+        E --> ER[error-report]
+        E --> REP[report<br/>README, RESULTS.md, charts]
+    end
+```
+
+`groundcheck pipeline` runs the whole thing in order and skips stages whose inputs
+haven't changed; `groundcheck pipeline --dry-run` runs it offline with fakes in two
+seconds.
+
+## What is new here, and what isn't
+
+Prior work this builds on, stated plainly:
+
+- **MiniCheck** (Tang, Laban and Durrett, 2024) trains small fact-checkers on synthetic
+  data to judge whether a grounding document supports a sentence, and shows they can
+  approach large-LLM checkers at a fraction of the cost. GroundCheck uses MiniCheck as a
+  baseline, unchanged.
+- **HHEM** (Vectara's Hughes Hallucination Evaluation Model, HHEM-2.1-Open) scores
+  whether a hypothesis is consistent with a premise. Also used as a baseline, unchanged.
+- Rule-based perturbations of true sentences to create training negatives go back at
+  least to FactCC (Kryściński et al., 2020). GroundCheck's training data follows that
+  idea.
+
+What this project adds is narrower and practical:
+
+1. **A domain test set where these checkers are least tested:** claims about 10-K
+   filings, many from financial tables, with numbers, units, scales and fiscal periods.
+   Every label is a human judgment against the retrieved passages, with an exact
+   evidence span and an edge-case tag (negation, rounding, units/scale, table misread,
+   temporal, partial support, hedging, absent evidence).
+2. **Three labels, not two.** MiniCheck and HHEM say "supported or not"; GroundCheck
+   separates *contradicted* (the passage says otherwise) from *unsupported* (the
+   passage doesn't say), and reports a binary view so the binary models are compared
+   fairly.
+3. **Natural hallucinations rather than synthetic ones in the test set:** answers are
+   generated in three modes (with the right passages, closed-book, and with
+   deliberately mismatched passages), so the test set holds the errors a small model
+   actually makes.
+4. **A full $0 benchmark on an 8 GB laptop,** including latency per claim, with any
+   hosted model shown only as a clearly labeled cost estimate.
+
+Nothing here is a new model architecture: the fine-tuned verifier is a standard
+DeBERTa-v3-small classifier, and its training data is synthetic.
 
 ## Results
 
-Every number below stays **TBD** until a real run produces it. Nothing here is estimated.
+The section between the markers is written by `groundcheck report` from the result
+files. Until a real run exists it stays TBD; nothing here is estimated.
 
-### Retrieval (fixed-size chunks, one FAISS index per company)
+<!-- RESULTS:START -->
+*Not run yet.* Retrieval: `groundcheck eval-retrieval`. Verifiers: label claims, then
+`groundcheck export-labels` and `groundcheck eval-verifiers`. Then `groundcheck report`
+fills in this section, [docs/RESULTS.md](docs/RESULTS.md) and the charts.
+<!-- RESULTS:END -->
 
-On the 30 questions in `data/eval/retrieval_questions.yaml`. They were drafted by an AI
-from the filings and are not yet reviewed, so differences under about 0.1 are noise.
+**Retrieval measured so far** (manual runs before `groundcheck report` existed; kept for
+reference until the report replaces them). On the 30 questions in
+`data/eval/retrieval_questions.yaml`, drafted by an AI from the filings and not yet
+reviewed, so differences under about 0.1 are noise:
 
 | Variant | recall@1 | recall@5 | recall@10 |
 |---|---|---|---|
@@ -38,37 +118,9 @@ from the filings and are not yet reviewed, so differences under about 0.1 are no
 
 Variants and how to compare them: [docs/DESIGN.md](docs/DESIGN.md), "Retrieval variants".
 
-### Labeled test set
+## Quickstart: 8 GB MacBook Air, $0
 
-| | Value |
-|---|---|
-| Items | TBD |
-| Claims | TBD |
-| Label distribution (S / C / U) | TBD |
-
-### Verifier benchmark
-
-| Verifier | Accuracy | Latency (p50) | Cost / 1,000 checks |
-|---|---|---|---|
-| Fine-tuned small verifier | TBD | TBD | TBD |
-| Prompted frontier judge | TBD | TBD | TBD |
-| MiniCheck | TBD | TBD | TBD |
-| HHEM | TBD | TBD | TBD |
-
-## Quickstart
-
-```bash
-python3 -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev]"
-pytest -q
-```
-
-## Quickstart on a Mac
-
-Tested target: an Apple-silicon MacBook (8 GB RAM is enough for the default
-`llama3.2:3b`). Everything runs locally; nothing costs money.
-
-**1. Install the package** (Python 3.11 or newer, e.g. `brew install python@3.12`):
+Python 3.11+ and [Ollama](https://ollama.com/download). Everything runs locally.
 
 ```bash
 git clone https://github.com/krupal2241/GroundCheck.git && cd GroundCheck
@@ -79,130 +131,153 @@ python3 -m venv .venv && source .venv/bin/activate
 ```
 
 ```bash
-pip install -e ".[dev,embed]"
+pip install -e ".[dev]" && make test
+```
+
+```bash
+groundcheck pipeline --dry-run
+```
+
+The dry run uses synthetic filings and fake models and writes only to
+`data/cache/dry-run/`. For the real thing:
+
+```bash
+pip install -e ".[dev,embed,verifiers,report]"
 ```
 
 Add `rerank` (`pip install -e ".[dev,embed,rerank]"`) only to try the cross-encoder
 reranker variant; the default retriever doesn't need it.
 
-**2. Set your SEC user agent** (SEC's fair-access rules require a name and email):
-
 ```bash
-cp .env.example .env    # then edit .env: SEC_USER_AGENT="Your Name you@example.com"
-```
-
-**3. Install Ollama and pull the model.** Install the Ollama app from
-[ollama.com/download](https://ollama.com/download) (or `brew install ollama` and run
-`ollama serve` in another terminal), then:
-
-```bash
-ollama pull llama3.2:3b
+cp .env.example .env    # then set SEC_USER_AGENT="Your Name you@example.com"
 ```
 
 ```bash
-groundcheck llm-info
-```
-
-It prints the provider, model, model digest and Ollama version, and a one-word reply.
-
-**4. Download, parse, chunk and index** (filings are pinned in `config/companies.yaml`):
-
-```bash
-groundcheck download
+ollama pull llama3.2:3b && groundcheck llm-info
 ```
 
 ```bash
-groundcheck parse
+groundcheck pipeline --to generate
 ```
 
-```bash
-groundcheck chunk
-```
-
-```bash
-groundcheck index
-```
-
-`parse` ends with "Parsed 8 filing(s) ...; N warning(s)"; JPM and XOM show NOTE lines
-for their recovered Items 7 and 8. `index` downloads bge-small once and builds one
-FAISS index per company for the default retrieval variant (`config/retrieval.yaml`),
-under `data/index/<embedding>/`.
+That downloads the eight pinned filings (rate-limited, cached), parses, chunks, builds
+the FAISS indexes for the default retrieval variant (`default` in
+`config/retrieval.yaml`, under `data/index/<embedding>/`), evaluates retrieval and
+generates candidates in all three modes with that retriever. Generation is resumable:
+interrupt it and run the command again. On a fanless Air, `make generate` runs it in
+batches of 5 with a 60-second pause. A free Colab T4 can do the generation instead
+(`notebooks/generate_candidates_colab.ipynb`). `--variant NAME` picks another variant
+for the index, eval-retrieval and generate stages.
 
 **Optional: compare retrieval variants** (dense, contextual headers, hybrid BM25,
-reranker, bge-base). Build every variant's index, then print one comparison table:
+reranker, bge-base). Index every variant, then print one comparison table:
 
 ```bash
-groundcheck index --variant all --only AAPL MSFT AMZN WMT XOM JNJ
+groundcheck pipeline --from index --to eval-retrieval --compare
+```
+
+(or `groundcheck index --variant all` and `groundcheck eval-retrieval --compare`). It
+writes `data/eval/results/compare.json` and `compare.md`, prints the recommended default
+(best recall@5, or the fastest variant within 0.05 of it), and `groundcheck report`
+adds the table to docs/RESULTS.md. To adopt it, set `default:` in
+`config/retrieval.yaml`, then run the pipeline again (the index stage re-runs).
+
+Then label (see [docs/labeling_guide.md](docs/labeling_guide.md)):
+
+```bash
+groundcheck label-plan --claims 300
 ```
 
 ```bash
-groundcheck eval-retrieval --compare
-```
-
-It also writes `data/eval/results/compare.json` and `compare.md` and prints the
-recommended default (best recall@5, or the fastest variant within 0.05 of it). To adopt
-it, set `default:` in `config/retrieval.yaml`, then run `groundcheck index` for it.
-
-**5. Write questions** in `data/questions/candidate_questions.yaml` (ten typed slots
-per labeled company) and/or `data/eval/retrieval_questions.yaml`. Questions with text
-in either file are used; you don't write a question twice.
-
-**6. Generate candidates** (rehearse first with the fake model, then for real):
-
-```bash
-python scripts/generate_candidates.py --dry-run --limit 3
-```
-
-```bash
-python scripts/generate_candidates.py --batch-size 5 --sleep-between-batches 60
-```
-
-Output goes to `data/candidates/<TICKER>.jsonl` (dry runs to `data/cache/dry-run/`).
-Interrupt it any time and run the same command again: it resumes where it stopped.
-`--company AAPL` limits to one company, `--model` picks another Ollama model. On a
-free Colab GPU, use `notebooks/generate_candidates_colab.ipynb` instead.
-
-**7. Label the claims** (see [docs/labeling_guide.md](docs/labeling_guide.md)):
-
-```bash
-groundcheck label --only-unlabeled
+groundcheck label --plan data/labels/label_plan.json --only-unlabeled
 ```
 
 ```bash
 groundcheck label-stats
 ```
 
-```bash
-groundcheck label-check
-```
+And benchmark and report:
 
 ```bash
-groundcheck export-labels
+groundcheck pipeline --from export-labels
 ```
 
-Labels autosave to `data/labels/labels.jsonl`; `export-labels` writes only confirmed
-labels to `data/eval/gold_labels.jsonl`.
+On 8 GB, the verifiers run one at a time (each is freed before the next loads).
+
+## How to reproduce
+
+| Step | Command | Output |
+|---|---|---|
+| Everything, skipping unchanged stages | `groundcheck pipeline` (`--from`, `--to`, `--force`) | all of the below |
+| Offline rehearsal | `groundcheck pipeline --dry-run` | `data/cache/dry-run/pipeline/` |
+| Retrieval eval | `groundcheck eval-retrieval` | `data/eval/results/retrieval_*.json` |
+| Candidates | `python scripts/generate_candidates.py --mode {rag,no-context,wrong-context}` | `data/candidates/*.jsonl` |
+| Gold set | `groundcheck label-check && groundcheck export-labels` | `data/eval/gold_labels.jsonl` |
+| Verifiers | `groundcheck eval-verifiers --verifier prompted hhem minicheck` | `results/verifier_eval.{json,md}`, `results/predictions/` |
+| Fine-tuned verifier | `notebooks/finetune_verifier_colab.ipynb`, then `--verifier finetuned --finetuned-path models/...` | `models/` (not committed) |
+| Error analysis | `groundcheck error-report` | `results/error_report.md` |
+| Report | `groundcheck report` | this README's results, `docs/RESULTS.md`, `docs/figures/` |
+
+What pins the results: accession numbers in `config/companies.yaml`, temperature 0 and
+seed 42 for the LLM, the model digest and Ollama version recorded in every candidate,
+the prompt version, sha256 of the chunk file in every candidate, sha256 of the gold
+file in every verifier result, and fixed seeds for sampling and training. The
+committed candidate and label files are the source of truth, because a different
+Ollama build can change outputs even at temperature 0.
+
+## Limitations
+
+- **Small test set, one annotator.** A few hundred claims labeled by one person: no
+  inter-annotator agreement, and differences of a few points between verifiers are
+  within noise. See [docs/THREATS_TO_VALIDITY.md](docs/THREATS_TO_VALIDITY.md).
+- **AI-drafted questions.** The 60 questions (and the retrieval gold strings) were
+  drafted by an AI assistant from the committed chunks, for the author to review, so
+  they may be easier to retrieve than questions a real user would write.
+- **One small generator.** Claims come from a 3B local model; a frontier model makes
+  fewer and different mistakes.
+- **Judged against retrieved passages only.** "Unsupported" means "not in the top-5
+  passages", not "false"; retrieval misses show up as unsupported claims.
+- **Synthetic training data** for the fine-tuned verifier; its synthetic scores
+  overstate real accuracy ([docs/MODEL_CARD.md](docs/MODEL_CARD.md)).
+- **MiniCheck and HHEM are binary;** their three-way scores are low by construction.
+  Compare them on the supported-vs-not column.
+- **English 10-Ks of eight large US companies,** one fiscal year each.
+
+## Docs
+
+- [docs/DESIGN.md](docs/DESIGN.md): every module, why it is built that way, and the alternatives
+- [docs/RESULTS.md](docs/RESULTS.md): full results, generated by `groundcheck report`
+- [docs/DATASET_CARD.md](docs/DATASET_CARD.md): how the questions, candidates and labels were made
+- [docs/MODEL_CARD.md](docs/MODEL_CARD.md): the fine-tuned verifier
+- [docs/THREATS_TO_VALIDITY.md](docs/THREATS_TO_VALIDITY.md): what could make the results misleading
+- [docs/labeling_guide.md](docs/labeling_guide.md): label definitions and worked edge cases
+- [docs/INTERVIEW_NOTES.md](docs/INTERVIEW_NOTES.md): design decisions as questions and answers
+- [docs/PLAN.md](docs/PLAN.md): the original two-week plan
 
 ## Repository layout
 
 ```
-src/groundcheck/   package: edgar, parsing, chunking, retrieval, llm, generation, labeling
-scripts/           standalone runs (e.g. candidate generation)
-notebooks/         Colab notebook for candidate generation on a free GPU
-config/            companies (pinned accession numbers) and pipeline settings
+src/groundcheck/   edgar, parsing, chunking, retrieval, llm, generation, labeling,
+                   verify, training, pipeline, report, demo
+scripts/           candidate generation, verifier fine-tuning
+notebooks/         Colab: candidate generation, fine-tuning
+config/            companies (pinned filings), LLM, training splits, prices (estimate only)
 data/              committed: chunks, questions, candidates, labels (raw filings are not)
-docs/              PLAN.md, DESIGN.md, labeling_guide.md
-tests/             pytest suite (offline; no network, no models)
+results/           verifier results, predictions, error report
+docs/              design, results, cards, guides
+tests/             pytest, fully offline (no network, no model downloads)
 ```
 
-## Docs
-
-- [docs/PLAN.md](docs/PLAN.md): two-week plan, open questions and risks
-- [docs/DESIGN.md](docs/DESIGN.md): what each module does, why, and the alternatives considered
-- [docs/labeling_guide.md](docs/labeling_guide.md): how to label a claim, with worked edge cases
+`make help` lists the common commands. A local demo (`pip install -e ".[demo]"`, then
+`groundcheck demo`) shows an answer's claims with their labels and highlighted evidence
+on 127.0.0.1.
 
 ## Data and fair access
 
-Filings come from SEC EDGAR's official APIs. Requests send a `SEC_USER_AGENT` header
-(read from your environment), are rate-limited to at most 5 per second, and are cached on
-disk so no file is downloaded twice.
+Filings come from SEC EDGAR. Every request sends your `SEC_USER_AGENT`, requests are
+limited to 5 per second, and every file is cached so nothing is downloaded twice. Any
+paid LLM provider is refused unless `--allow-paid` is passed, and none is configured.
+
+## License
+
+MIT, see [LICENSE](LICENSE).

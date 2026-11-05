@@ -2,6 +2,8 @@
 
     python scripts/generate_candidates.py --company AAPL --batch-size 5 --limit 10
     python scripts/generate_candidates.py --dry-run          # FakeProvider, no model
+    python scripts/generate_candidates.py --mode no-context  # closed-book answers
+    python scripts/generate_candidates.py --mode wrong-context --wrong-context-source mixed
 
 `--dry-run` uses the FakeProvider and writes to `data/cache/dry-run/candidates/`
 (gitignored), so a rehearsal never mixes into the committed candidates.
@@ -20,6 +22,7 @@ from groundcheck.config import (
     load_companies,
     load_llm_config,
 )
+from groundcheck.generation.modes import MODES, WRONG_SOURCES, WrongContextPicker
 from groundcheck.generation.pipeline import (
     DEFAULT_CANDIDATES_DIR,
     DRY_RUN_CANDIDATES_DIR,
@@ -42,7 +45,7 @@ from groundcheck.retrieval.embedder import EMBEDDERS
 from groundcheck.retrieval.evaluate import DEFAULT_QUESTIONS_PATH
 from groundcheck.retrieval.index import DEFAULT_INDEX_DIR, file_sha256
 from groundcheck.retrieval.rerank import RERANKERS
-from groundcheck.retrieval.retriever import open_retriever
+from groundcheck.retrieval.retriever import open_retriever, searchable
 from groundcheck.retrieval.variants import (
     DEFAULT_RETRIEVAL_CONFIG_PATH,
     fiscal_years,
@@ -71,6 +74,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="use the FakeProvider (no model) and write under data/cache/dry-run/",
     )
     add_llm_options(parser)
+    parser.add_argument(
+        "--mode",
+        choices=MODES,
+        default="rag",
+        help="rag: answer from the retrieved passages; no-context: closed-book; "
+        "wrong-context: answer from passages of another company or another Item",
+    )
+    parser.add_argument(
+        "--wrong-context-source",
+        choices=WRONG_SOURCES,
+        default="mixed",
+        help="wrong-context only: other-company, other-item, or mixed (per question)",
+    )
     parser.add_argument("--no-cache", action="store_true", help="don't use data/cache/llm")
     parser.add_argument("--top-k", type=int, default=None, help="default: from config (5)")
     parser.add_argument("--questions", type=Path, default=DEFAULT_CANDIDATE_QUESTIONS_PATH)
@@ -138,22 +154,37 @@ def _run(args: argparse.Namespace) -> int:
         )
     out_dir = args.out_dir or (DRY_RUN_CANDIDATES_DIR if args.dry_run else DEFAULT_CANDIDATES_DIR)
 
-    # Load every index first, so a missing one fails before any model call.
+    # Open the retriever (every index it needs) first, so a missing or mismatching
+    # index fails before any model call.
     tickers = sorted({q.ticker for q in questions})
     retrieval = load_retrieval_config(args.retrieval_config)
     variant, spec = retrieval.get(args.variant)
     spec = spec.with_overrides(args.embedder, args.reranker)
+    years = fiscal_years(companies)
     retriever = open_retriever(
-        variant,
-        spec,
-        retrieval,
-        tickers,
-        args.chunks_dir,
-        args.index_dir,
-        fiscal_years(companies),
+        variant, spec, retrieval, tickers, args.chunks_dir, args.index_dir, years,
         device=args.device,
-    )
-    _refuse_mixed_variants(questions, provider, out_dir, variant)
+    )  # fmt: skip
+    picker = None
+    if args.mode == "wrong-context":
+        # Other companies too (any role), for "another company's passages": every company
+        # this variant can search (its index exists, or BM25 alone needs only chunks).
+        others = [
+            c.ticker
+            for c in companies.companies
+            if c.ticker not in tickers
+            and searchable(c.ticker, spec, retriever.embedder, args.chunks_dir, args.index_dir)
+        ]
+        if others:
+            retriever = open_retriever(
+                variant, spec, retrieval, sorted([*tickers, *others]), args.chunks_dir,
+                args.index_dir, years, embedder=retriever.embedder,
+                reranker=retriever.reranker, device=args.device,
+            )  # fmt: skip
+        picker = WrongContextPicker(
+            retriever.search, sorted(retriever.companies), args.wrong_context_source
+        )
+    _refuse_mixed_variants(questions, provider, out_dir, variant, args.mode)
     embedder_name = retriever.embedder.name if retriever.embedder is not None else "none"
     infos = {
         t: RetrievalInfo(
@@ -171,9 +202,13 @@ def _run(args: argparse.Namespace) -> int:
     print(
         f"Model: {identity.provider} {identity.model} (digest {identity.model_digest[:19]}, "
         f"{identity.runtime} {identity.runtime_version}); retriever {variant} "
-        f"({retriever.description}), top_k {llm_config.top_k}; output {out_dir}"
+        f"({retriever.description}), top_k {llm_config.top_k}; mode {args.mode}; "
+        f"output {out_dir}"
     )
-    generator = Generator(provider, retriever.search, infos.__getitem__, llm_config)
+    names = {c.ticker: c.name for c in companies.companies}
+    generator = Generator(
+        provider, retriever.search, infos.__getitem__, llm_config, names, args.mode, picker
+    )
     summary = run(
         generator,
         questions,
@@ -186,17 +221,24 @@ def _run(args: argparse.Namespace) -> int:
         f"Wrote {summary.written} candidate(s) with {summary.claims} claim(s); "
         f"{summary.already_done} already done; {len(summary.failed)} failed."
     )
+    if summary.claims_rejected or summary.claim_retries:
+        print(
+            f"Claim validator: {summary.claims_rejected} claim(s) rejected, "
+            f"{summary.claim_retries} retry request(s) (details in each record's claim_filter)"
+        )
     hits = getattr(provider, "hits", None)
     if hits is not None:
         print(f"LLM cache: {hits} hit(s), {provider.misses} miss(es)")
     return 1 if summary.failed else 0
 
 
-def _refuse_mixed_variants(questions, provider, out_dir: Path, variant: str) -> None:
-    """Resuming skips questions that already have a record for this model. If those
-    records came from another retrieval variant, the output would silently mix two
+def _refuse_mixed_variants(
+    questions, provider, out_dir: Path, variant: str, mode: str = "rag"
+) -> None:
+    """Resuming skips questions that already have a record for this model and mode. If
+    those records came from another retrieval variant, the output would silently mix two
     retrievers, so refuse and say how to keep them apart."""
-    wanted = {candidate_id(q.id, provider) for q in questions}
+    wanted = {candidate_id(q.id, provider, mode) for q in questions}
     for ticker in sorted({q.ticker for q in questions}):
         for record in read_candidates(candidates_path(ticker, out_dir)):
             other = record.retrieval.variant

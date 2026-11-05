@@ -1,0 +1,10 @@
+# pre-commit hooks: ruff lint (with safe fixes) and ruff format, the same checks CI runs.
+#   pip install pre-commit && pre-commit install      # once per clone
+#   pre-commit run --all-files                        # check everything now
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.17.3
+    hooks:
+      - id: ruff
+        args: [--fix]
+      - id: ruff-format

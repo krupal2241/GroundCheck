@@ -26,8 +26,16 @@ data/parsed/
 data/index/
 # LLM response cache and dry-run output (re-creatable).
 data/cache/
+# Synthetic training data (re-created by `groundcheck build-training-data`) and
+# fine-tuned model weights (hundreds of MB).
+data/training/
+models/
 
 # OS / editor
 .DS_Store
 .idea/
 .vscode/
+
+# Coverage data
+.coverage
+htmlcov/

@@ -1,0 +1,36 @@
+# Synthetic training data for the fine-tuned verifier (`groundcheck build-training-data`).
+#
+# Splits are BY COMPANY: all of a company's examples go to one split, and unsupported
+# pairs that borrow evidence from another company stay within the split.
+#
+# The hand-labeled gold set never enters training, whatever is listed here: every chunk
+# that was retrieved for a candidate (all gold passages included) and every gold claim
+# are excluded in code (see docs/DESIGN.md, Part 3).
+#
+# Splits: train JPM, dev BRK-B, test = the six labeled companies.
+#
+# Why no labeled company trains: the hand-labeled test set is drawn from AAPL, MSFT,
+# AMZN, WMT, XOM and JNJ. Excluding their gold chunks and claims stops literal
+# leakage, but training on the rest of the same filing still teaches the model that
+# company's vocabulary, table layouts and segment names, which flatters the gold-set
+# score. JPM and BRK-B have no hand-labeled questions, so the fine-tuned verifier is
+# evaluated on companies it has never seen, and the synthetic test split (the six
+# labeled companies, gold chunks removed) measures the same thing on synthetic data.
+# BRK-B is dev (model selection only): a long, mixed filing (insurance, rail, energy)
+# unlike JPM's bank filing, so the chosen epoch is not tuned to one industry.
+# Cost: one training company gives a less varied training set; `build-training-data`
+# warns when the train split has fewer than 500 examples.
+
+seed: 13
+splits:
+  train: [JPM]
+  dev: [BRK-B]
+  test: [AAPL, MSFT, AMZN, WMT, XOM, JNJ]
+
+max_seeds_per_company: 1500   # supported seeds sampled per company (each gives up to 3 examples)
+numeric_seed_share: 0.7       # up to this share of seeds contain a number (gold claims mostly do)
+supported_rewrite_rate: 0.5   # share of supported examples that are reworded (synonym / rescale)
+other_company_rate: 0.5       # share of unsupported examples whose evidence is another company's
+partner_candidates: 60        # chunks sampled when picking an unsupported partner
+min_words: 8                  # prose sentences used as seeds: 8 to 45 words
+max_words: 45
