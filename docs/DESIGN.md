@@ -1034,14 +1034,10 @@ exclude (e.g. the gold files weren't pushed before running on Colab).
 
 **Splits are by company** (`config/training.yaml`): each company's examples go to one
 split, and `other_company` partners come from the same split, so no evidence text
-crosses splits either. Default: train JPM, BRK-B, AAPL, MSFT; dev AMZN (model selection
-only); test WMT, XOM, JNJ. *Why this split:* JPM and BRK-B aren't in the labeled set and
-have large filings; adding two labeled companies gives the model filing styles it will
-meet, while WMT, XOM and JNJ are never seen during training or model selection, so
-their rows in `eval-verifiers`' by-company table measure unseen companies. All gold
+crosses splits either. *Original default (Part 3):* train JPM, BRK-B, AAPL, MSFT; dev
+AMZN; test WMT, XOM, JNJ. **Changed in Overnight Part 1** to train JPM, dev BRK-B, test
+the six labeled companies: see "Claim-splitting quality" below for why. All gold
 passages are excluded from training regardless of the split.
-*Alternative:* train only on JPM and BRK-B, so every gold company is unseen; it's one
-line in the config, at the cost of a less varied training set.
 
 **Training** (`training/train.py`, `scripts/train_verifier.py`): Hugging Face `Trainer`
 on `microsoft/deberta-v3-small` (a strong small encoder for NLI-style pair tasks;
@@ -1127,3 +1123,328 @@ would reload the models unless cached by hand, and Gradio's HTML output is enoug
 check the highlighting and escaping, and build the app and the `demo` command over a
 stand-in `gradio` module (components, the click handler, and that `launch` gets
 127.0.0.1, port 7860, `share=False`).
+
+## Claim-splitting quality (`generation/claims.py`), Overnight Part 1
+
+**The problem, seen on the Mac:** llama3.2:3b split "According to passage [1], the
+Company repurchased 402 million shares of its common stock for $89.3 billion in fiscal
+2025." into eight claims, five of them fragments ("The Company", "its common stock"
+twice, "402 million", "billion"). A clean Greater China answer gave three good
+full-sentence claims, so the model *can* do it; the v1 prompt just didn't show it how.
+A fragment in the labeled set is worse than a missing claim: it can't be judged, and
+whichever label it gets is noise.
+
+**Prompt v2** (`prompts.claims_prompt`, `PROMPT_VERSION = "v2"`): seven numbered rules,
+then three worked examples, then the real answer. Rules: one complete, self-contained
+sentence per claim with a named subject and a verb; "the Company", "we", "it" and "its"
+replaced by the company's short name ("Apple", from `config/companies.yaml` with the
+legal suffix stripped by `short_company_name`); numbers, units, scale and period copied
+exactly; no fragments, duplicates or added facts; citations such as "According to
+passage [1]" left out; an empty list for an abstention. Examples: (1) the failing
+repurchase answer with its corrected two-claim output, (2) the clean Greater China case
+(three claims, two periods and a percentage change), (3) a Walmart percentage-change
+answer with "its" and a "passage [2]" citation to strip. *Why few-shot:* small models
+follow a demonstrated output format far more reliably than a described one, and the
+first example is literally the observed failure. *Why real filing numbers in the
+examples:* they are realistic, and the number validator below stops any of them leaking
+into a claim about another company (a copied "$89.3 billion" is not in that answer).
+
+**The validator** (deterministic, no model): a claim is rejected if it has fewer than 5
+words; has no verb-like word (a list of verbs and auxiliaries common in 10-K answers,
+or any alphabetic word of 5+ letters ending in "-ed"; "-s" and "-ing" endings are not
+counted, since "shares" and "operating income" are not verbs); duplicates an earlier
+kept claim (same words after lower-casing and stripping punctuation) or near-duplicates
+it (identical set of numbers and Jaccard similarity of content words >= 0.8; different
+numbers mean different facts, so "sales were $64,377 million in 2025" and "...$66,952
+million in 2024" are both kept); contains "passage [n]" or a bare "[n]"; or contains a
+number that is not in the answer (commas and trailing zeros normalized, so "$12,345"
+matches "12345"). A year counts as a number, so a claim that adds "fiscal 2024" to an
+answer that only says "the previous year" is rejected: that's an added fact.
+
+**Retries:** if any claim is rejected (or the list is empty for an answer that isn't
+the abstention sentence), the request is re-sent with a stricter message: the original
+prompt, then every rejected claim with its reasons, then the hard rules restated. At
+most 3 retries (`claim_max_retries` in `config/llm.yaml`); each attempt still has the
+JSON-level retries of `generate_structured`. The attempt with the most valid claims
+wins (ties go to the later, stricter attempt) and only its valid claims are kept. If a
+*retry* fails to produce JSON at all, the best earlier attempt is kept; only a first
+request that never parses fails the question (as before). *Why keep the best attempt
+rather than the last:* a stricter retry can over-correct and drop facts.
+
+**Statistics** go into every candidate as `claim_filter`: `proposed`, `rejected`, `kept`
+(for the chosen attempt), `retries`, `chosen_attempt`, per-attempt counts, every
+rejected claim with its reasons, and `validator_version`. The generation script prints
+"N claim(s) (P proposed, R rejected, T retries)" per question and a total. *Why record
+the rejected text:* it shows whether the validator is too strict (a good claim rejected
+for a missing verb) without re-running the model.
+
+**Cache:** the LLM cache key is the sha256 of the full system prompt, prompt and
+parameters, so the v2 prompt, the company name inside it, and each retry prompt all get
+new keys; a test pins that a v1-prompt request and a v2 request differ. Validator
+changes need no cache change: the cached reply is re-validated.
+
+**What the validator can't catch:** a full sentence with the wrong subject ("The
+Company repurchased ..." still passes: rule 2 is the prompt's job, not a hard rule,
+because rejecting every "the Company" would also reject legitimate quotations), a
+claim that paraphrases a fact wrongly without changing a number, and a verb outside the
+list in a short present-tense sentence. The labeling tool's `x` key covers the rest.
+
+**Invalid claims in labeling (`x`):** a claim the validator missed (a fragment, a
+duplicate) shouldn't be forced into supported/contradicted/unsupported. `x` saves a
+`LabelRecord` with `invalid: true`, no label, no evidence and no edge case (the schema
+enforces all three) plus an optional reason in `note`. `export-labels` never exports
+it; `label-stats` reports "Invalid claims: N" on its own line and leaves invalid
+records out of every label breakdown; `label-check` validates them like any record (the
+claim must exist with the same text; an invalid record with a label is an error). *Why
+a record and not a deletion:* the claim stays in the candidates file (append-only), so
+without a record `--only-unlabeled` would show it again forever.
+
+**Training split changed (`config/training.yaml`): train JPM, dev BRK-B, test the six
+labeled companies.** The earlier split trained on AAPL and MSFT and used AMZN for model
+selection. Gold chunks and claims were excluded, but the rest of those filings still
+taught the model each company's vocabulary, table layouts and segment names, which
+flatters the gold-set score in a way no exclusion rule can remove. Now no company with
+hand-labeled questions is seen in training or model selection. BRK-B is dev because it
+is a very different filing from JPM's (a conglomerate vs a bank), so the selected epoch
+isn't tuned to one industry. *Cost:* one training company. `build-training-data` prints
+a WARNING when the train split has fewer than 500 examples, and so does
+`scripts/train_verifier.py`. The 500 threshold is a judgment call: below it a
+DeBERTa-small fine-tune on three classes is mostly noise.
+
+## Generation modes and balanced labeling plans (`generation/modes.py`, `labeling/plan.py`), Overnight Part 2
+
+**The problem:** a 3B model answering from good passages mostly produces supported
+claims. Labeling only those gives a test set with very few contradicted and unsupported
+claims, so accuracy rewards a verifier that always says "supported", and the per-class
+numbers for the two interesting classes rest on a handful of examples.
+
+**`--mode` in `scripts/generate_candidates.py`:**
+
+| Mode | What the model sees | Typical claims |
+|---|---|---|
+| `rag` (default) | the top-k chunks retrieved for the question | mostly supported |
+| `no-context` | nothing: a closed-book prompt (`CLOSED_BOOK_SYSTEM`) with the company name and the question | numbers from memory: contradicted or unsupported |
+| `wrong-context` | top-k chunks for the same question from another company's index, or the best-ranked chunks of the same company from Items the correct passages don't come from | the wrong company's or section's facts, presented as the answer |
+
+*Why natural rather than synthetic errors:* the synthetic perturbations used for
+training (Part 3) are exactly what the fine-tuned verifier learned; a test set built
+from them would measure memorized perturbation rules. Errors the model makes on its own
+are the distribution a deployed verifier would face.
+
+**Decisions:**
+- **The evidence for labeling is always the correct passages.** Every record's
+  `retrieved` field holds the chunks retrieved for its own question, in every mode;
+  what the model actually saw goes in `context` (`[]` for no-context, the mismatched
+  chunks for wrong-context, absent for rag) with `context_source` (`none`,
+  `other-company:MSFT`, `other-item:AAPL Item 1A`). Labeling, `label-check`, export and
+  `eval-verifiers` keep using `retrieved` unchanged, so a no-context claim is judged
+  against what the filing says about the question, not against nothing. The labeler
+  shows a `MODE:` line saying what the model saw.
+- **No abstention sentence in the closed-book prompt.** The point of the mode is what a
+  small model asserts from memory; offering a fixed "I don't know" sentence would turn
+  most answers into abstentions (which have no claims to label).
+- **The wrong-context prompt is the normal rag prompt** (same system prompt, abstention
+  allowed), with only the passages swapped. The model can and sometimes will say the
+  passages don't answer; that is honest behavior, and the claims that do come out are
+  the realistic failure: an answer stitched from the wrong evidence.
+- **`--wrong-context-source mixed`** (default) picks per question, by a sha256 of the
+  question ID (deterministic, unlike Python's salted `hash`), between another company
+  and another Item. The other company is also chosen by hash among every company that
+  has an index (JPM and BRK-B included: they make good wrong context precisely because
+  nobody labels them). If one kind is impossible (no other index, or every deep hit is
+  from the correct Items) the other is used; if both are, the question is reported as
+  failed and retried on the next run. "Other Item" searches the top 60 of the same
+  company's ranking and keeps the best chunks whose Item differs from all of the correct
+  top-k's Items: on-topic words, wrong section.
+- **Candidate IDs include the mode:** `<question id>@<mode>@<provider>:<model>`, so the
+  three modes append side by side and resume independently. Records written before
+  modes existed load as `rag` (the field has a default); their IDs keep the old format.
+- **Training exclusion covers wrong-context passages:** `candidate_chunk_ids` also
+  collects every `context` chunk, since gold claims in that mode restate them.
+- **`eval-verifiers` reports accuracy by generation mode** (gold exports now carry
+  `mode` and `context_source`), next to the edge-case and company breakdowns.
+
+**`groundcheck label-plan --questions N | --claims N`** proposes a balanced sample:
+greedily, the next candidate is the one whose company, question type and mode are the
+least represented so far, each count scaled by how many values that dimension has (so
+3 modes and 6 companies each aim at equal shares); ties are broken by a seeded hash of
+the candidate ID (`--seed`), never file order. Candidates without claims are skipped.
+Claims already in the label file count towards the balance and their candidates are
+not planned again, so a second plan fills the gaps left by the first. The plan is JSON
+(`data/labels/label_plan.json`: target, seed, whether the target was reached, the
+ordered candidate IDs), and `groundcheck label --plan FILE` walks exactly those
+candidates in order (combine with `--only-unlabeled` to resume). *Why greedy rather
+than stratified quotas:* strata are uneven (an unanswerable question in no-context mode
+may have no claims at all), and greedy balancing degrades gracefully when a cell is
+empty. *What it can't balance:* the label itself, which is unknown until labeled; mode
+is the proxy. `label-stats` shows how well that worked.
+
+**`label-stats`** now adds counts by mode and three cross-tables: mode x label, company
+x label, question type x label, so the class balance per mode is visible after each
+session.
+
+## Labeling assistance (`labeling/assist.py`), Overnight Part 3
+
+**Evidence-span suggestion:** for each claim, every retrieved chunk is cut into units
+with the verifiers' own splitter (`verify.spans.units`: one unit per table row, one per
+sentence in prose) and scored with the same lexical overlap the cross-encoder verifiers
+use to cite spans (share of the claim's numbers x3 plus content words). The best unit
+over all chunks is offered (ties: better-ranked chunk, then the shorter unit, then the
+earlier one). Before it is shown it goes through `make_span` and is checked to sit at
+its offsets in the normalized chunk text, the same exact-substring rule the gold schema
+enforces, so accepting it can never produce an invalid label. `a` + Enter accepts it;
+pasting a span works as before. *Decision: on by default, shown only after the label
+key.* It is a search aid, not an opinion: at that point the annotator has already said
+supported or contradicted, so it can only change which span is cited, and that is
+recorded (`evidence_suggested`, `evidence_accepted`). `--no-evidence-suggest` turns it
+off. *Why not let the annotator accept a suggestion before choosing the label:* a
+highlighted row that looks right is itself a nudge towards "supported".
+
+**Label suggestion (`groundcheck label --suggest VERIFIER`):** any verifier from
+`make_verifier` (fake, prompted, minicheck, hhem, finetuned) is run on the claim and the
+candidate's retrieved chunks, and its label and P(supported) are shown before the label
+prompt. *OFF by default*, because showing a label anchors the annotator; the test set
+would then partly measure agreement with that verifier. *Local only:*
+`VerifierOptions(allow_paid=False)` is hard-coded on this path, and the command has no
+`--allow-paid` option. A verifier error shows "unavailable" and records no suggestion.
+
+**What is recorded:** every label saved by the tool has an `assistance` object:
+`evidence_suggested`, `evidence_accepted`, `label_suggestion_shown`, `suggested_label`,
+`suggestion_verifier`, `suggestion_score`, and `agreed` (final label equals the
+suggestion; null when none was shown or the claim was marked invalid). Labels written
+before this part have no `assistance` and count as "no suggestion shown". `label-stats`
+prints the agreement rate, a per-verifier count, the label distribution with vs without
+suggestions side by side, and the evidence-suggestion acceptance rate. *Why compare
+distributions and not only agreement:* agreement alone can't tell anchoring from a good
+verifier; a shift in the label mix between assisted and blind labels of similar
+candidates can. With one annotator and small numbers it is a warning light, not a test.
+The risk and the rules for using `--suggest` are in `docs/labeling_guide.md`.
+
+## One-command pipeline and reproducibility (`pipeline/`, Makefile, pre-commit, CI coverage), Overnight Part 4
+
+**`groundcheck pipeline`** runs download, parse, chunk, index, eval-retrieval,
+generate (all three modes by default, `--modes` to choose), export-labels,
+eval-verifiers (`--verifiers`, default prompted, hhem, minicheck), error-report and
+report, in that order; `--from` and `--to` pick a contiguous range, `--list` prints the
+stages. Each stage calls the same entry point as its standalone command (the CLI's
+`main`, or `generate_candidates.py`'s `main`), so there is exactly one implementation of
+every step and the pipeline can't drift from the documented commands.
+
+**Skipping unchanged stages:** a stage's fingerprint is the sha256 over its settings
+(e.g. embedder, tokenizer, modes), a stage version, and the relative path and sha256 of
+every file under its inputs (input directories are walked; `.part` files ignored). After
+a stage succeeds the fingerprint is stored in `data/cache/pipeline/<stage>.json`
+(gitignored) with its outputs. Next time, if the fingerprint matches and every output
+still exists, the stage prints "skipped (inputs unchanged since the last successful
+run)". Because the inputs of one stage are the outputs of the one before, a stage that
+re-runs and writes byte-identical output (say, re-parsing an unchanged filing) leaves
+everything downstream skipped. A failed stage stops the run, stores nothing, and marks
+the rest "not run". `--force` ignores stored fingerprints. *Why content hashes and not
+modification times (make-style):* `git checkout` and Colab round-trips rewrite mtimes
+without changing content, and a timestamp says nothing about whether a model or setting
+changed. *Why no DAG library (Snakemake, DVC, Prefect):* ten stages in a fixed order fit
+in one file, and each extra tool is something to install and explain.
+*Caveats:* generate is resumable on its own (it skips existing candidate IDs), so its
+fingerprint only decides whether to call it at all; the LLM is not an input file, so
+after pulling a new model use `--force --from generate` (the LLM cache key includes the
+model digest, so nothing stale is reused). A stage with no input (no label file yet, no
+gold labels, no predictions) reports "nothing to do" and is not stored, so it runs as
+soon as the input appears. Labels are never created by the pipeline.
+
+**`--dry-run`** writes only under `data/cache/dry-run/pipeline/` (or `--scratch-dir`)
+and uses fakes for everything that needs the network or a model: `FakeSecClient` serves
+a synthetic 10-K per company, built from that company's committed chunks (an Item 1,
+1A, 7 and 8 heading each followed by up to six of its own paragraphs and tables, and a
+note saying it is synthetic), so parse, chunk and index run on realistic text;
+chunking uses no tokenizer limit (no bge tokenizer offline), indexing and retrieval the
+hashing embedder, generation the fake LLM, evaluation the fake verifier. The real label
+file is never read in a dry run (its claim IDs wouldn't match the fake candidates); a
+dry-run label file in the scratch directory is used if one exists. A full dry run takes
+about two seconds and is what the tests run.
+
+**Makefile:** `make help` lists the targets; each is a one-line wrapper over a
+documented command (`install`, `dev`, `lint`, `format`, `test`, `coverage`, `dry-run`,
+`pipeline`, `generate` in all modes with cool-down batches, `label-plan`, `label`,
+`label-stats`, `report`, `demo`, `precommit`, `clean-cache`). **pre-commit**
+(`.pre-commit-config.yaml`): ruff with `--fix` and ruff-format, pinned to v0.17.3, the
+version used here. **CI coverage:** `pytest-cov` joined the `[dev]` extra and the test
+job runs `pytest --cov=groundcheck --cov-report=term`, then prints the total percentage
+(also in the job summary) in a step marked `continue-on-error`. There is no
+`--cov-fail-under`, so coverage is reported, never enforced (93% when this was written).
+**LICENSE:** MIT, matching `pyproject.toml`; none existed before.
+
+## Automatic results report (`report/build.py`, `groundcheck report`), Overnight Part 5
+
+**What:** `groundcheck report` reads `results/verifier_eval.json` (written by
+`eval-verifiers`), every `data/eval/results/*.json` (written by `eval-retrieval`, one
+per embedder), and the label file with the candidates, and regenerates:
+
+- `docs/RESULTS.md`, in full: the retrieval table (recall@k and section-hit@k per
+  embedder), the verifier comparison (accuracy, macro-F1, supported-vs-not accuracy,
+  latency p50 and p95, cost per 1,000 checks), accuracy by edge case, by generation
+  mode and by company (one column per verifier, with n), a confusion matrix and a
+  per-class precision/recall/F1 table per verifier, the charts, and the gold set's class
+  balance by mode;
+- the README section between `<!-- RESULTS:START -->` and `<!-- RESULTS:END -->`
+  (retrieval and verifier tables plus a link to RESULTS.md);
+- the class-balance table between `<!-- BALANCE:START -->` / `<!-- BALANCE:END -->` in
+  `docs/DATASET_CARD.md`, from confirmed, valid labels only;
+- `docs/figures/accuracy_vs_latency.png` (one point per verifier, latency on a log
+  axis, direct labels plus a legend) and `docs/figures/edge_case_accuracy.png` (grouped
+  bars per edge-case tag, n under each tag).
+
+**Never inventing numbers:** every cell comes from a result file. A missing file is
+listed as `MISSING: ... run <command>` on the console and as "Not run yet" in
+RESULTS.md, never as a number. *Decision:* the README section is replaced only when
+**both** the retrieval and the verifier results exist; with either missing, the README
+is left byte-for-byte untouched (a test checks this), so a half-run never replaces the
+README's TBD placeholders with a half-empty table. RESULTS.md is always regenerated,
+because it says plainly what is missing. If the README has no markers it is not
+touched either. The replacement is idempotent, so re-running gives the same file.
+
+**Cost column:** "$0 (local)" for every verifier that ran locally (all built-in ones).
+A hosted model appears only if `config/prices.yaml` lists one, as a row named "hosted
+judge (estimate only, not run)" whose metric cells say "not run" and whose cost cell
+says "~X USD (estimate)". The estimate itself is the arithmetic `eval-verifiers`
+already did and labeled; the report only copies it.
+
+**Charts:** matplotlib is in a new `[report]` extra and imported only when charts are
+drawn, with the non-interactive Agg backend. Without it the charts are skipped with a
+message and every table is still written. Colors are the dataviz skill's validated
+categorical order on a near-white surface; grid and axes are recessive, there is one
+y-axis per chart, and identity is never color-only (direct labels on the scatter, a
+legend and n-labels on the bars). Tests drive the chart code through a stand-in
+`pyplot` that records calls, so CI needs no matplotlib; the real rendering was checked
+by eye in a scratch environment with synthetic numbers that were not committed.
+
+**In the pipeline:** the `report` stage runs it with the same paths (scratch paths in
+a dry run, where the scratch README doesn't exist, so it is never touched).
+
+## Documentation for readers outside the project (README, cards, threats, interview notes), Overnight Part 6
+
+**README rewrite:** a one-paragraph problem statement, a Mermaid diagram of the whole
+pipeline (GitHub renders it; it is plain text in the repo), what is novel versus
+MiniCheck, HHEM and FactCC-style synthetic negatives, stated narrowly (a domain test set
+with three labels, evidence spans and natural hallucinations, and a $0 benchmark; not a
+new model), a quickstart that starts with the offline dry run so it works on an 8 GB
+MacBook Air before anything is downloaded, a reproduce table (command and output file
+per step, and what pins the results), the results section between the report markers,
+and limitations. The old step-by-step Mac walkthrough is now the pipeline plus a few
+labeling commands; the per-command details remain in DESIGN.md and `--help`.
+
+**Cards and threats:** `docs/DATASET_CARD.md` (how questions, candidates and labels
+were made, label definitions, generation modes, a class-balance table filled by
+`groundcheck report` between markers, a single annotator, and the known biases,
+including AI-drafted questions and 3B-model answers); `docs/MODEL_CARD.md` (the
+fine-tuned verifier: base model, input format, aggregation, the company split,
+leakage exclusion, intended use, the synthetic-data caveat; metrics left to the
+generated reports); `docs/THREATS_TO_VALIDITY.md` (test-set size with a worked
+confidence-interval rule of thumb, single annotator, AI-drafted questions, retrieval
+quality, synthetic training data, and smaller threats). `docs/INTERVIEW_NOTES.md`
+turns this file's decisions into likely questions with short answers.
+
+**Rule kept everywhere:** no result is quoted in any document. The README and
+RESULTS.md numbers come only from `groundcheck report`; `docs/RESULTS.md` is committed
+in its "not run yet" form, generated by the report command itself. Report paths are
+written relative to the repository so no machine's home directory ends up in a
+committed file.

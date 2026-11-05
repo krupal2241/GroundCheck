@@ -12,6 +12,9 @@ Rules (see docs/labeling_guide.md):
 - `edge_case` is one tag from the labeling guide's list, or None.
 - `confirmed` is True only once a human has confirmed the label. Export keeps only
   confirmed labels (PLAN.md: no fabricated gold labels).
+- `invalid` marks a claim that should never have been proposed (a fragment, a
+  duplicate, a claim with no checkable content): it has no label, no evidence and no
+  edge case, and it is never exported. `label-stats` counts these separately.
 
 The schema checks what it can on its own. Pass the candidate's chunks as validation
 context (`LabelRecord.model_validate(data, context={"chunks": {chunk_id: text}})`)
@@ -81,6 +84,20 @@ def make_span(chunk_id: str, chunk_text: str, evidence: str) -> EvidenceSpan | N
     return EvidenceSpan(chunk_id=chunk_id, text=needle, start=start, end=start + len(needle))
 
 
+class Assistance(BaseModel):
+    """What assistance was shown for one label (stored in `LabelRecord.assistance`)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    evidence_suggested: bool = False  # an evidence span was offered
+    evidence_accepted: bool = False  # ... and accepted with one key
+    label_suggestion_shown: bool = False
+    suggested_label: Label | None = None
+    suggestion_verifier: str | None = None
+    suggestion_score: float | None = None  # the verifier's P(supported)
+    agreed: bool | None = None  # final label == suggested label (None: none shown)
+
+
 class LabelRecord(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -91,12 +108,16 @@ class LabelRecord(BaseModel):
     ticker: str
     qtype: str
     claim: str = Field(min_length=1)
-    label: Label
+    label: Label | None = None  # None only for an invalid claim
+    invalid: bool = False  # the `x` key: a malformed claim, not labeled, never exported
     evidence: list[EvidenceSpan] = Field(default_factory=list)
     edge_case: EdgeCase | None = None
     confirmed: bool = False
     note: str = ""
     labeled_at: str = ""  # UTC, ISO 8601
+    # Which suggestions were shown (labeling/assist.py). None: labeled before
+    # assistance existed, i.e. nothing was suggested.
+    assistance: Assistance | None = None
 
     @field_validator("note")
     @classmethod
@@ -105,6 +126,12 @@ class LabelRecord(BaseModel):
 
     @model_validator(mode="after")
     def _label_rules(self) -> "LabelRecord":
+        if self.invalid:
+            if self.label is not None or self.evidence or self.edge_case is not None:
+                raise ValueError("an invalid claim has no label, evidence or edge case")
+            return self
+        if self.label is None:
+            raise ValueError("a label is required unless the claim is marked invalid")
         if self.label in ("supported", "contradicted") and not self.evidence:
             raise ValueError(f"a {self.label} label needs at least one evidence span")
         if self.label == "unsupported" and self.evidence:

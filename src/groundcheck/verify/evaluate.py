@@ -71,6 +71,7 @@ class GoldRecord(BaseModel):
     evidence: list[EvidenceSpan] = []
     edge_case: EdgeCase | None = None
     note: str = ""
+    mode: str = "rag"  # generation mode of the candidate (exports before modes: rag)
     passages: list[GoldPassage]
 
     @property
@@ -116,6 +117,7 @@ class Prediction(BaseModel):
     claim_id: str
     ticker: str
     edge_case: str
+    mode: str = "rag"
     claim: str
     gold: Label
     predicted: Label
@@ -142,6 +144,7 @@ def run_verifier(
                 claim_id=record.claim_id,
                 ticker=record.ticker,
                 edge_case=record.tag,
+                mode=record.mode,
                 claim=record.claim,
                 gold=record.label,
                 predicted=result.label,
@@ -223,6 +226,7 @@ class VerifierReport(BaseModel):
     binary: BinaryMetrics
     by_edge_case: dict[str, GroupMetrics]
     by_company: dict[str, GroupMetrics]
+    by_mode: dict[str, GroupMetrics] = {}
     latency: LatencyMetrics
     evidence_agreement: EvidenceAgreement
     parse_errors: int
@@ -340,6 +344,7 @@ def build_report(
         binary=binary_metrics(golds, preds),
         by_edge_case=group_metrics(predictions, lambda p: p.edge_case),
         by_company=group_metrics(predictions, lambda p: p.ticker),
+        by_mode=group_metrics(predictions, lambda p: p.mode),
         latency=latency_metrics([p.latency_ms for p in predictions], wall_seconds),
         evidence_agreement=evidence_agreement(predictions, gold),
         parse_errors=sum(p.parse_error for p in predictions),
@@ -545,7 +550,12 @@ def _verifier_section(r: VerifierReport) -> list[str]:
     lines.append("|---" * (len(LABELS) + 1) + "|")
     for g in LABELS:
         lines.append(f"| {g} | " + " | ".join(str(r.confusion[g][p]) for p in LABELS) + " |")
-    for title, groups in (("edge-case tag", r.by_edge_case), ("company", r.by_company)):
+    breakdowns = (
+        ("edge-case tag", r.by_edge_case),
+        ("company", r.by_company),
+        ("generation mode", r.by_mode),
+    )
+    for title, groups in breakdowns:
         lines += ["", f"By {title}:", "", f"| {title.capitalize()} | n | Accuracy |"]
         lines.append("|---|---|---|")
         lines += [f"| {k} | {g.n} | {_pct(g.accuracy)} |" for k, g in groups.items()]

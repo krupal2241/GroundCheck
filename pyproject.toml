@@ -25,7 +25,12 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",
+    "pytest-cov>=5.0",
     "ruff>=0.6",
+]
+# Charts for `groundcheck report` (docs/figures/*.png). The Markdown tables need nothing.
+report = [
+    "matplotlib>=3.8",
 ]
 # The real embedding model (BAAI/bge-small-en-v1.5). Pulls in PyTorch, so it is not
 # installed in CI: tests use the hashing fake embedder instead.

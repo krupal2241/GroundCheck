@@ -2,6 +2,8 @@
 
     python scripts/generate_candidates.py --company AAPL --batch-size 5 --limit 10
     python scripts/generate_candidates.py --dry-run          # FakeProvider, no model
+    python scripts/generate_candidates.py --mode no-context  # closed-book answers
+    python scripts/generate_candidates.py --mode wrong-context --wrong-context-source mixed
 
 `--dry-run` uses the FakeProvider and writes to `data/cache/dry-run/candidates/`
 (gitignored), so a rehearsal never mixes into the committed candidates.
@@ -20,6 +22,7 @@ from groundcheck.config import (
     load_companies,
     load_llm_config,
 )
+from groundcheck.generation.modes import MODES, WRONG_SOURCES, WrongContextPicker
 from groundcheck.generation.pipeline import (
     DEFAULT_CANDIDATES_DIR,
     DRY_RUN_CANDIDATES_DIR,
@@ -61,6 +64,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="use the FakeProvider (no model) and write under data/cache/dry-run/",
     )
     add_llm_options(parser)
+    parser.add_argument(
+        "--mode",
+        choices=MODES,
+        default="rag",
+        help="rag: answer from the retrieved passages; no-context: closed-book; "
+        "wrong-context: answer from passages of another company or another Item",
+    )
+    parser.add_argument(
+        "--wrong-context-source",
+        choices=WRONG_SOURCES,
+        default="mixed",
+        help="wrong-context only: other-company, other-item, or mixed (per question)",
+    )
     parser.add_argument("--no-cache", action="store_true", help="don't use data/cache/llm")
     parser.add_argument("--top-k", type=int, default=None, help="default: from config (5)")
     parser.add_argument("--questions", type=Path, default=DEFAULT_CANDIDATE_QUESTIONS_PATH)
@@ -111,6 +127,15 @@ def _run(args: argparse.Namespace) -> int:
     # Load every index first, so a missing one fails before any model call.
     tickers = sorted({q.ticker for q in questions})
     indexes = {t: CompanyIndex.load(t, args.chunks_dir, args.index_dir) for t in tickers}
+    picker = None
+    if args.mode == "wrong-context":
+        # Other companies' indexes too (any role), for "another company's passages".
+        for company in companies.companies:
+            folder = args.index_dir / company.ticker
+            if company.ticker not in indexes and (folder / "meta.json").is_file():
+                indexes[company.ticker] = CompanyIndex.load(
+                    company.ticker, args.chunks_dir, args.index_dir
+                )
     embedder = make_embedder(args.embedder, args.device)
     infos = {
         t: RetrievalInfo(
@@ -125,13 +150,19 @@ def _run(args: argparse.Namespace) -> int:
     def retrieve(ticker: str, question: str, k: int):
         return indexes[ticker].search(embedder, question, k)
 
+    if args.mode == "wrong-context":
+        picker = WrongContextPicker(retrieve, sorted(indexes), args.wrong_context_source)
+
     identity = provider.identity()
     print(
         f"Model: {identity.provider} {identity.model} (digest {identity.model_digest[:19]}, "
         f"{identity.runtime} {identity.runtime_version}); embedder {embedder.name}, "
-        f"top_k {llm_config.top_k}; output {out_dir}"
+        f"top_k {llm_config.top_k}; mode {args.mode}; output {out_dir}"
     )
-    generator = Generator(provider, retrieve, infos.__getitem__, llm_config)
+    names = {c.ticker: c.name for c in companies.companies}
+    generator = Generator(
+        provider, retrieve, infos.__getitem__, llm_config, names, args.mode, picker
+    )
     summary = run(
         generator,
         questions,
@@ -144,6 +175,11 @@ def _run(args: argparse.Namespace) -> int:
         f"Wrote {summary.written} candidate(s) with {summary.claims} claim(s); "
         f"{summary.already_done} already done; {len(summary.failed)} failed."
     )
+    if summary.claims_rejected or summary.claim_retries:
+        print(
+            f"Claim validator: {summary.claims_rejected} claim(s) rejected, "
+            f"{summary.claim_retries} retry request(s) (details in each record's claim_filter)"
+        )
     hits = getattr(provider, "hits", None)
     if hits is not None:
         print(f"LLM cache: {hits} hit(s), {provider.misses} miss(es)")

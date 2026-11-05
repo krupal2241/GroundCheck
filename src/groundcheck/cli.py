@@ -24,6 +24,7 @@ from groundcheck.chunking.base import (
 from groundcheck.chunking.fixed import DEFAULT_MAX_TOKENS, FixedSizeChunker
 from groundcheck.config import (
     DEFAULT_COMPANIES_PATH,
+    REPO_ROOT,
     ConfigError,
     get_sec_user_agent,
     load_companies,
@@ -32,6 +33,7 @@ from groundcheck.config import (
 from groundcheck.edgar.client import SecClient, SecRequestError
 from groundcheck.edgar.download import DEFAULT_RAW_DIR, download_all, resolve_latest_10k
 from groundcheck.generation.pipeline import DEFAULT_CANDIDATES_DIR
+from groundcheck.labeling.plan import DEFAULT_PLAN_PATH, balance_table, load_plan, make_plan
 from groundcheck.labeling.report import check_labels, export_labels, label_stats
 from groundcheck.labeling.session import Labeler
 from groundcheck.labeling.store import (
@@ -270,11 +272,65 @@ def _candidates(args: argparse.Namespace):
 def cmd_label(args: argparse.Namespace) -> int:
     candidates = _candidates(args)
     store = LabelStore(args.labels)
+    if args.plan:
+        ids = load_plan(args.plan)
+        by_id = {c.candidate_id: c for c in candidates}
+        missing = [i for i in ids if i not in by_id]
+        if missing:
+            raise ConfigError(
+                f"{len(missing)} planned candidate(s) not in {args.candidates_dir} "
+                f"(first: {missing[0]}); was the plan made from other candidates?"
+            )
+        candidates = [by_id[i] for i in ids]
+        print(f"Plan {args.plan}: {len(candidates)} candidate(s), in plan order.")
     items = claim_items(candidates)
     done = sum(store.get(i.claim.claim_id) is not None for i in items)
     print(f"{len(items)} claim(s) in {len(candidates)} candidate(s); {done} already labeled.")
     print("Paste evidence exactly as shown; finish a paste with an empty line. q quits.")
-    Labeler(store).run(items, only_unlabeled=args.only_unlabeled)
+    suggester = None
+    if args.suggest:
+        from groundcheck.labeling.assist import verifier_suggester
+
+        # Local models only: allow_paid is never passed through here.
+        options = VerifierOptions(
+            llm_config=args.llm_config,
+            allow_paid=False,
+            device=args.device,
+            finetuned_path=args.finetuned_path,
+        )
+        suggester = verifier_suggester(make_verifier(args.suggest, options))
+        print(
+            f"Label suggestions ON ({args.suggest}). Each label records what was suggested "
+            "and whether you agreed; see docs/labeling_guide.md on anchoring."
+        )
+    labeler = Labeler(
+        store, suggest_evidence=not args.no_evidence_suggest, label_suggester=suggester
+    )
+    labeler.run(items, only_unlabeled=args.only_unlabeled)
+    return 0
+
+
+def cmd_label_plan(args: argparse.Namespace) -> int:
+    candidates = _candidates(args)
+    labeled = set(LabelStore(args.labels).records) if args.labels.is_file() else set()
+    plan = make_plan(candidates, args.questions, args.claims, args.seed, labeled)
+    by_id = {c.candidate_id: c for c in candidates}
+    chosen = [by_id[i] for i in plan.candidate_ids]
+    n_claims = sum(len(c.claims) for c in chosen)
+    target = ", ".join(f"{k} {v}" for k, v in plan.target.items())
+    print(
+        f"Plan: {len(chosen)} candidate(s), {n_claims} claim(s) (target: {target}; "
+        f"{len(labeled)} claim(s) already labeled count towards the balance)"
+    )
+    if not plan.reached:
+        print("WARNING: not enough unlabeled candidates with claims to reach the target.")
+    print(balance_table(chosen, "claims"))
+    if args.dry_run:
+        print("--dry-run: plan not written.")
+        return 0
+    args.out.parent.mkdir(parents=True, exist_ok=True)
+    args.out.write_text(plan.to_json(candidates))
+    print(f"Wrote {args.out}; label it with: groundcheck label --plan {args.out}")
     return 0
 
 
@@ -291,7 +347,11 @@ def cmd_label_check(args: argparse.Namespace) -> int:
     for problem in problems:
         print(f"ERROR: {problem}")
     status = "OK" if not problems else f"{len(problems)} problem(s)"
-    print(f"{len(records)} valid label record(s) in {args.labels}; {status}")
+    invalid = sum(r.invalid for r in records)
+    print(
+        f"{len(records)} valid label record(s) in {args.labels} ({invalid} marked invalid); "
+        f"{status}"
+    )
     return 1 if problems else 0
 
 
@@ -304,9 +364,11 @@ def cmd_export_labels(args: argparse.Namespace) -> int:
         print("Nothing exported: fix these first (`groundcheck label-check`).")
         return 1
     n = export_labels(records, candidates, args.out)
+    invalid = sum(r.invalid for r in records)
     print(
         f"Exported {n} confirmed label(s) to {args.out}; "
-        f"{len(records) - n} unconfirmed label(s) left out."
+        f"{len(records) - n - invalid} unconfirmed label(s) and {invalid} invalid claim(s) "
+        "left out."
     )
     return 0
 
@@ -421,6 +483,9 @@ def cmd_demo(args: argparse.Namespace) -> int:
     return 0
 
 
+MIN_TRAINING_EXAMPLES = 500
+
+
 def cmd_build_training_data(args: argparse.Namespace) -> int:
     config = load_training_config(args.training_config)
     gold_paths = [args.gold, args.labels]
@@ -446,8 +511,70 @@ def cmd_build_training_data(args: argparse.Namespace) -> int:
         detail = ", ".join(f"{k} {v}" for k, v in sorted(counts.items()))
         print(f"  {split:<5} {total:>6} example(s)  {detail}")
     print(f"By rule: {manifest['counts_by_rule']}")
+    n_train = sum(manifest["counts_by_split_and_label"].get("train", {}).values())
+    if n_train < MIN_TRAINING_EXAMPLES:
+        print(
+            f"WARNING: only {n_train} training example(s) (fewer than "
+            f"{MIN_TRAINING_EXAMPLES}). A verifier fine-tuned on this few will be weak; "
+            "add companies to the train split or raise max_seeds_per_company."
+        )
     print(f"Wrote {args.out_dir}/{{train,dev,test}}.jsonl and manifest.json")
     return 0
+
+
+def cmd_report(args: argparse.Namespace) -> int:
+    from groundcheck.report.build import build_report
+
+    outcome = build_report(
+        args.results_dir,
+        args.retrieval_results_dir,
+        readme=args.readme,
+        docs_dir=args.docs_dir,
+        labels_path=args.labels,
+        candidates_dir=args.candidates_dir,
+    )
+    for item in outcome.missing:
+        print(f"MISSING: {item}")
+    for message in outcome.messages:
+        print(message)
+    print(
+        f"Wrote {outcome.results_md}"
+        + (f" and {len(outcome.figures)} chart(s)" if outcome.figures else "")
+    )
+    print("README.md results section " + ("updated." if outcome.readme_updated else "NOT changed."))
+    return 0
+
+
+def cmd_pipeline(args: argparse.Namespace) -> int:
+    from groundcheck.pipeline.runner import (
+        DRY_RUN_DIR,
+        STAGES,
+        Context,
+        Options,
+        Paths,
+        format_summary,
+        run_pipeline,
+    )
+
+    if args.list:
+        print("Stages, in order: " + " -> ".join(STAGES))
+        return 0
+    paths = Paths.dry_run(args.scratch_dir or DRY_RUN_DIR) if args.dry_run else Paths()
+    options = Options(
+        dry_run=args.dry_run,
+        force=args.force,
+        modes=tuple(args.modes),
+        verifiers=tuple(args.verifiers),
+        embedder=args.embedder,
+        tokenizer=args.tokenizer,
+        device=args.device,
+        generate_args=tuple(args.generate_arg or ()),
+    )
+    where = f"scratch directory {paths.raw.parent}" if args.dry_run else "the repository"
+    print(f"Pipeline ({'DRY RUN, fakes only' if args.dry_run else 'real'}), writing to {where}")
+    result = run_pipeline(Context(paths, options), args.from_stage, args.to_stage)
+    print(format_summary(result))
+    return 0 if result.ok else 1
 
 
 def add_verifier_options(parser: argparse.ArgumentParser) -> None:
@@ -632,12 +759,47 @@ def build_parser() -> argparse.ArgumentParser:
     label.add_argument(
         "--only-unlabeled", action="store_true", help="skip claims that already have a label"
     )
+    label.add_argument(
+        "--plan",
+        type=Path,
+        default=None,
+        help="walk through exactly the candidates of a plan from `groundcheck label-plan`",
+    )
+    label.add_argument(
+        "--suggest",
+        choices=VERIFIER_NAMES,
+        default=None,
+        help="show this local verifier's proposed label before you decide (OFF by "
+        "default: a suggestion can anchor you; every label records whether one was shown)",
+    )
+    label.add_argument(
+        "--no-evidence-suggest",
+        action="store_true",
+        help="don't offer the best-matching sentence or table row as evidence",
+    )
+    label.add_argument("--llm-config", type=Path, default=None, help="--suggest prompted")
+    label.add_argument("--device", default=None, help="--suggest minicheck/hhem/finetuned")
+    label.add_argument("--finetuned-path", type=Path, default=None, help="--suggest finetuned")
     label.set_defaults(func=cmd_label)
+
+    plan = subparsers.add_parser(
+        "label-plan",
+        parents=[label_options],
+        help="propose a sample balanced across companies, question types and modes",
+    )
+    target = plan.add_mutually_exclusive_group(required=True)
+    target.add_argument("--questions", type=int, help="number of candidate answers to plan")
+    target.add_argument("--claims", type=int, help="number of claims to plan")
+    plan.add_argument("--company", nargs="+", metavar="TICKER", help="limit to tickers")
+    plan.add_argument("--seed", type=int, default=0, help="tie-break seed (default 0)")
+    plan.add_argument("--out", type=Path, default=DEFAULT_PLAN_PATH)
+    plan.add_argument("--dry-run", action="store_true", help="print the plan, write nothing")
+    plan.set_defaults(func=cmd_label_plan)
 
     stats = subparsers.add_parser(
         "label-stats",
         parents=[label_options],
-        help="label counts by label, company, question type and edge case",
+        help="label counts by label, mode, company, question type and edge case",
     )
     stats.add_argument("--company", nargs="+", metavar="TICKER", help="limit to tickers")
     stats.set_defaults(func=cmd_label_stats)
@@ -749,6 +911,56 @@ def build_parser() -> argparse.ArgumentParser:
         help="every chunk retrieved for a candidate is excluded as well",
     )
     training.set_defaults(func=cmd_build_training_data)
+
+    report = subparsers.add_parser(
+        "report",
+        help="regenerate README results, docs/RESULTS.md and charts from the result files",
+    )
+    report.add_argument("--results-dir", type=Path, default=DEFAULT_RESULTS_DIR)
+    report.add_argument(
+        "--retrieval-results-dir", type=Path, default=DEFAULT_QUESTIONS_PATH.parent / "results"
+    )
+    report.add_argument("--readme", type=Path, default=REPO_ROOT / "README.md")
+    report.add_argument("--docs-dir", type=Path, default=REPO_ROOT / "docs")
+    report.add_argument("--labels", type=Path, default=DEFAULT_LABELS_PATH)
+    report.add_argument("--candidates-dir", type=Path, default=DEFAULT_CANDIDATES_DIR)
+    report.set_defaults(func=cmd_report)
+
+    from groundcheck.generation.modes import MODES
+    from groundcheck.pipeline.runner import DEFAULT_VERIFIERS, STAGES
+
+    pipeline = subparsers.add_parser(
+        "pipeline",
+        help="run every stage (download ... report), skipping stages whose inputs are unchanged",
+    )
+    pipeline.add_argument("--from", dest="from_stage", choices=STAGES, default=None)
+    pipeline.add_argument("--to", dest="to_stage", choices=STAGES, default=None)
+    pipeline.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="offline: fake SEC client, hashing embedder, fake LLM and verifier; writes "
+        "only to a scratch directory",
+    )
+    pipeline.add_argument(
+        "--scratch-dir", type=Path, default=None, help="dry run output (default data/cache/...)"
+    )
+    pipeline.add_argument("--force", action="store_true", help="re-run even unchanged stages")
+    pipeline.add_argument("--list", action="store_true", help="list the stages and exit")
+    pipeline.add_argument("--modes", nargs="+", choices=MODES, default=list(MODES))
+    pipeline.add_argument(
+        "--verifiers", nargs="+", choices=VERIFIER_NAMES, default=list(DEFAULT_VERIFIERS)
+    )
+    pipeline.add_argument("--embedder", choices=["bge-small", "hashing"], default="bge-small")
+    pipeline.add_argument("--tokenizer", choices=["bge-small", "none"], default="bge-small")
+    pipeline.add_argument("--device", default=None)
+    pipeline.add_argument(
+        "--generate-arg",
+        action="append",
+        metavar="ARG",
+        help="extra argument for generate_candidates.py, e.g. --generate-arg=--limit "
+        "--generate-arg=5 (repeatable)",
+    )
+    pipeline.set_defaults(func=cmd_pipeline)
     return parser
 
 

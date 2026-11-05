@@ -34,6 +34,13 @@ same text appears in two chunks, the tool asks which one you mean.
 **Confirm.** Answer `Y` only when you're sure. An unconfirmed label is kept as a draft
 and is left out of `export-labels`.
 
+**Invalid claims (`x`).** If the "claim" is not a checkable statement at all (a
+fragment like "402 million" or "its common stock", a duplicate of another claim of the
+same answer, or a sentence with no subject), press `x` instead of labeling it and give
+a short reason. It is saved as invalid: no label, no evidence, never exported, and
+counted separately by `label-stats`. Don't use `x` for a claim that is merely wrong or
+oddly worded; that still gets a label.
+
 **Edge-case tag.** Pick at most one tag, the one that decided the label. Use none for
 an ordinary claim.
 
@@ -199,11 +206,44 @@ measures whether the answer is grounded in what the model was given. No evidence
 > Claim: *"The company has about 160,000 employees."* → **unsupported**,
 > tag `absent_evidence`.
 
+## Suggestions and the anchoring risk
+
+`groundcheck label` can help in two ways. Both are recorded in every label
+(`assistance` in `data/labels/labels.jsonl`), so their effect can be measured.
+
+**Evidence suggestion (on by default).** After you choose `s` or `c`, the tool shows
+the sentence or table row from the retrieved chunks that contains the most of the
+claim's numbers and words. Type `a` and Enter (then Enter again to finish) to cite it,
+or paste your own span instead. It is shown only *after* you've picked the label, so it
+can't push you towards a label, but it can still steer *which* span you cite: check
+that it is the span that actually decides the claim (the right row, the right year
+column), not just the one with the most overlapping words. `--no-evidence-suggest`
+turns it off.
+
+**Label suggestion (`--suggest VERIFIER`, off by default).** Shows a local verifier's
+proposed label (e.g. `--suggest prompted`, `--suggest minicheck`) before you decide.
+This is a real risk to the test set: an annotator who sees "supported" tends to look
+for reasons to agree (anchoring), and the gold labels would then drift towards that
+verifier's opinions. The verifier would score well on a test set it helped write, and
+the comparison between verifiers would no longer be fair. So:
+
+- Leave it off for the labels that go into the reported numbers. Use it, if at all,
+  for a pilot or for re-checking a batch you already labeled blind.
+- Never use the verifier you're going to evaluate as the suggester for the labels you
+  evaluate it on.
+- Every label records whether a suggestion was shown, which label and verifier, its
+  score, and whether you agreed. `label-stats` prints the agreement rate and the label
+  distribution with vs without suggestions. A much higher share of the suggested label
+  among assisted labels is the warning sign.
+- Only local verifiers are offered; `--suggest` never allows a paid provider.
+
 ## Workflow
 
 ```bash
-groundcheck label --only-unlabeled          # label; q quits, run again to resume
+groundcheck label --only-unlabeled          # label; x = invalid claim; q quits, run again to resume
 groundcheck label --company AAPL            # one company; Enter keeps existing labels
+groundcheck label-plan --claims 300         # a sample balanced across company, qtype, mode
+groundcheck label --plan data/labels/label_plan.json --only-unlabeled
 groundcheck label-stats                     # counts by label, company, qtype, edge case
 groundcheck label-check                     # validate every record (exit 1 on problems)
 groundcheck export-labels                   # confirmed labels -> data/eval/gold_labels.jsonl

@@ -9,7 +9,7 @@ import pytest
 import hf_standins
 from groundcheck.chunking.base import Chunk, write_chunks
 from groundcheck.cli import main
-from groundcheck.config import ConfigError
+from groundcheck.config import ConfigError, load_companies
 from groundcheck.training import perturb
 from groundcheck.training.data import (
     TrainingConfig,
@@ -218,8 +218,11 @@ def test_training_config_rules():
         TrainingConfig(splits={"dev": ["A"]})
     committed = load_training_config()  # config/training.yaml
     seen = committed.splits["train"] + committed.splits["dev"]
-    assert not {"WMT", "XOM", "JNJ"} & set(seen)
-    assert {"JPM", "BRK-B"} <= set(committed.splits["train"])
+    # No company with hand-labeled questions is used for training or model selection.
+    labeled = {c.ticker for c in load_companies().companies if c.role == "labeled"}
+    assert not labeled & set(seen)
+    assert committed.splits["train"] == ["JPM"] and committed.splits["dev"] == ["BRK-B"]
+    assert set(committed.splits["test"]) == labeled
 
 
 def test_build_training_data_command(training_inputs, tmp_path, capsys):
@@ -240,6 +243,7 @@ def test_build_training_data_command(training_inputs, tmp_path, capsys):
     assert main(args) == 0
     out = capsys.readouterr().out
     assert "WARNING: MISSING" in out and "Excluded 1 gold claim(s)" in out
+    assert "WARNING: only" in out and "fewer than 500" in out  # tiny synthetic corpus
     assert (tmp_path / "cli-out" / "manifest.json").is_file()
 
 
