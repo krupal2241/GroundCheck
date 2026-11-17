@@ -615,6 +615,14 @@ def cmd_build_training_data(args: argparse.Namespace) -> int:
     for problem in manifest["companies_in_config_without_chunks"]:
         print(f"WARNING: {problem} is in {args.training_config or 'config/training.yaml'} "
               "but has no chunks")  # fmt: skip
+    for path in manifest["gold_files_missing"]:
+        print(
+            f"WARNING: {path} does not exist, so nothing from it was excluded. If you have "
+            "labeled or exported anything, pass the right --gold / --labels path before "
+            "training; otherwise this is expected."
+        )
+    for item in manifest["dev_items_without_chunks"]:
+        print(f"WARNING: dev_items lists {item}, but that company has no chunk from it")
     if not (manifest["gold_claims_excluded"] or manifest["candidate_chunks_excluded"]):
         print(
             "WARNING: found no gold labels, label file or candidates to exclude. That is "
@@ -624,8 +632,13 @@ def cmd_build_training_data(args: argparse.Namespace) -> int:
     print(
         f"Excluded {manifest['gold_claims_excluded']} gold claim(s), "
         f"{manifest['gold_chunks_excluded']} gold chunk(s) and "
-        f"{manifest['candidate_chunks_excluded']} other candidate chunk(s)."
+        f"{manifest['candidate_chunks_excluded']} other candidate chunk(s), plus "
+        f"{manifest['chunks_excluded_sharing_gold_span']} chunk(s) that contain a gold "
+        "evidence span."
     )
+    for split, by_ticker in manifest["items_by_split"].items():
+        detail = "; ".join(f"{t}: Items {', '.join(items)}" for t, items in by_ticker.items())
+        print(f"  {split:<5} uses {detail or 'nothing'}")
     for split, counts in manifest["counts_by_split_and_label"].items():
         total = sum(counts.values())
         detail = ", ".join(f"{k} {v}" for k, v in sorted(counts.items()))
@@ -635,8 +648,10 @@ def cmd_build_training_data(args: argparse.Namespace) -> int:
     if n_train < MIN_TRAINING_EXAMPLES:
         print(
             f"WARNING: only {n_train} training example(s) (fewer than "
-            f"{MIN_TRAINING_EXAMPLES}). A verifier fine-tuned on this few will be weak; "
-            "add companies to the train split or raise max_seeds_per_company."
+            f"{MIN_TRAINING_EXAMPLES}). A verifier fine-tuned on this few will be weak. "
+            "Check that the train companies (JPM and BRK-B by default) have chunks "
+            "(`groundcheck chunk`), hold out fewer dev_items, or raise "
+            "max_seeds_per_company in the training config."
         )
     print(f"Wrote {args.out_dir}/{{train,dev,test}}.jsonl and manifest.json")
     return 0

@@ -21,10 +21,20 @@ Leakage rules, enforced in code:
 1. **The hand-labeled gold set never enters training.** Every chunk that appears as a
    passage in `data/eval/gold_labels.jsonl` (and in the label file, if given) is
    excluded as seed and as evidence, and any example whose claim matches a gold claim
-   (after whitespace normalization, case-insensitive) is dropped. The counts are in
-   the manifest.
-2. **Splits are by company.** Each company's examples go to exactly one split
-   (`config/training.yaml`), and `other_company` partners come from the same split.
+   (after whitespace normalization, case-insensitive) is dropped. Chunk IDs are not
+   enough: prose windows overlap by 50 words, a window split to fit the token limit
+   has two IDs, and Items 7 and 8 repeat the same table rows. So every other chunk
+   whose text **contains a gold evidence span** (whitespace-normalized, at least
+   `MIN_SPAN_CHARS` characters) is excluded too. The counts are in the manifest.
+2. **Splits are by company, and inside a training company by Item.** A company in
+   `splits.train` trains, except for the Items listed for it under `dev_items`, which
+   go to dev (model selection) instead. Prose windows never cross an Item, so train and
+   dev share no chunk and no overlapping window; `check_item_disjoint` verifies that no
+   (company, Item) pair is used by two splits, counting the evidence chunk of every
+   example, and the build fails otherwise. `other_company` and `other_section` partners
+   always come from the same split. Test companies are never in train or dev.
+3. **A missing gold file is reported**, per path (`gold_files_missing` in the manifest;
+   the command prints a warning for each), never skipped silently.
 
 Output (`data/training/`, gitignored, re-creatable): `train.jsonl`, `dev.jsonl`,
 `test.jsonl` and `manifest.json` (settings, seed, input hashes, counts by split,
@@ -62,6 +72,9 @@ DEFAULT_TRAINING_CONFIG = REPO_ROOT / "config" / "training.yaml"
 DEFAULT_TRAINING_DIR = REPO_ROOT / "data" / "training"
 LABEL_IDS: dict[str, int] = {"supported": 0, "contradicted": 1, "unsupported": 2}
 SPLITS = ("train", "dev", "test")
+# Gold evidence spans shorter than this ("4%", "2025") occur in too many chunks to be
+# evidence of anything; they are not used for the span-based exclusion.
+MIN_SPAN_CHARS = 12
 
 
 def encode_pair(tokenizer, evidence: str, claim: str, max_length: int):
@@ -75,7 +88,10 @@ class TrainingConfig(BaseModel):
 
     seed: int = 13
     splits: dict[Literal["train", "dev", "test"], list[str]]
+    # Items of a TRAIN company held out for dev: {ticker: [item, ...]}.
+    dev_items: dict[str, list[str]] = Field(default_factory=dict)
     max_seeds_per_company: int = Field(default=1500, ge=1)
+    max_dev_seeds_per_company: int = Field(default=400, ge=1)
     numeric_seed_share: float = Field(default=0.7, ge=0, le=1)
     supported_rewrite_rate: float = Field(default=0.5, ge=0, le=1)
     other_company_rate: float = Field(default=0.5, ge=0, le=1)
@@ -93,10 +109,24 @@ class TrainingConfig(BaseModel):
                 seen[ticker] = split
         if not self.splits.get("train"):
             raise ValueError("the train split needs at least one company")
+        for ticker, items in self.dev_items.items():
+            if seen.get(ticker) != "train":
+                raise ValueError(f"dev_items: {ticker} is not a company of the train split")
+            if not items or len(set(items)) != len(items):
+                raise ValueError(f"dev_items: {ticker} needs a list of distinct Items")
+        if not self.splits.get("dev") and not self.dev_items:
+            raise ValueError(
+                "no dev set: list companies under splits.dev or held-out Items under dev_items"
+            )
         return self
 
-    def split_of(self, ticker: str) -> str | None:
-        return next((s for s, tickers in self.splits.items() if ticker in tickers), None)
+    def split_of(self, ticker: str, item: str | None = None) -> str | None:
+        """The split of a company, or of one of its Items when `item` is given (a train
+        company's `dev_items` go to dev)."""
+        split = next((s for s, tickers in self.splits.items() if ticker in tickers), None)
+        if split == "train" and item is not None and item in self.dev_items.get(ticker, []):
+            return "dev"
+        return split
 
 
 def load_training_config(path: Path | None = None) -> TrainingConfig:
@@ -123,6 +153,10 @@ class TrainingExample(BaseModel):
     seed_chunk_id: str
     seed_kind: Literal["sentence", "table_cell"]
     rule: str  # "seed", a rewrite name, "other_section" or "other_company"
+    # Where the seed and the evidence come from, for the Item-disjointness check.
+    seed_item: str = ""
+    evidence_ticker: str = ""
+    evidence_item: str = ""
 
 
 @dataclass
@@ -139,12 +173,29 @@ def claim_key(text: str) -> str:
     return normalize_for_match(text).lower()
 
 
-def gold_exclusions(paths: list[Path]) -> tuple[set[str], set[str]]:
-    """(chunk IDs, normalized claims) found in the gold export and/or the label file."""
+@dataclass
+class GoldExclusions:
+    chunk_ids: set[str]
+    claims: set[str]  # normalized (claim_key)
+    spans: set[str]  # normalized gold evidence spans of at least MIN_SPAN_CHARS
+    short_spans: int  # spans too short to match on
+    missing: list[str]  # paths that do not exist
+
+    def __iter__(self):  # (chunk IDs, claims): the original two-part result
+        return iter((self.chunk_ids, self.claims))
+
+
+def gold_exclusions(paths: list[Path]) -> GoldExclusions:
+    """Chunk IDs, normalized claims and evidence spans found in the gold export and/or
+    the label file; paths that do not exist are listed in `missing`."""
     chunk_ids: set[str] = set()
     claims: set[str] = set()
+    spans: set[str] = set()
+    short: set[str] = set()
+    missing: list[str] = []
     for path in paths:
         if not Path(path).is_file():
+            missing.append(str(path))
             continue
         for line in Path(path).read_text(encoding="utf-8").splitlines():
             if not line.strip():
@@ -154,7 +205,28 @@ def gold_exclusions(paths: list[Path]) -> tuple[set[str], set[str]]:
                 claims.add(claim_key(record["claim"]))
             chunk_ids |= {p["chunk_id"] for p in record.get("passages", [])}
             chunk_ids |= {s["chunk_id"] for s in record.get("evidence", [])}
-    return chunk_ids, claims
+            for span in record.get("evidence", []):
+                text = normalize_for_match(span.get("text", ""))
+                (spans if len(text) >= MIN_SPAN_CHARS else short).add(text)
+    return GoldExclusions(chunk_ids, claims, spans, len(short - {""}), missing)
+
+
+def chunks_sharing_gold_spans(
+    chunks_by_ticker: dict[str, list[Chunk]], spans: set[str], already: set[str]
+) -> set[str]:
+    """IDs of chunks (not already excluded) whose text contains a gold evidence span:
+    overlap neighbours, the other part of a split window, the same row in another Item."""
+    if not spans:
+        return set()
+    found = set()
+    for chunks in chunks_by_ticker.values():
+        for chunk in chunks:
+            if chunk.chunk_id in already:
+                continue
+            text = normalize_for_match(chunk.text)
+            if any(span in text for span in spans):
+                found.add(chunk.chunk_id)
+    return found
 
 
 def candidate_chunk_ids(candidates_dir: Path | None) -> set[str]:
@@ -227,7 +299,9 @@ def table_seeds(chunk: Chunk) -> list[Seed]:
     return seeds
 
 
-def company_seeds(chunks: list[Chunk], config: TrainingConfig, rng: random.Random) -> list[Seed]:
+def company_seeds(
+    chunks: list[Chunk], config: TrainingConfig, rng: random.Random, limit: int | None = None
+) -> list[Seed]:
     seeds = []
     for chunk in chunks:
         if chunk.kind == "table":
@@ -237,7 +311,7 @@ def company_seeds(chunks: list[Chunk], config: TrainingConfig, rng: random.Rando
     rng.shuffle(seeds)
     # Gold claims are mostly about numbers, so seeds with a number are preferred: up to
     # `numeric_seed_share` of the quota, the rest filled with any remaining seeds.
-    limit = config.max_seeds_per_company
+    limit = config.max_seeds_per_company if limit is None else limit
     with_numbers = [s for s in seeds if numbers(s.claim)]
     chosen = with_numbers[: round(limit * config.numeric_seed_share)]
     taken = {id(s) for s in chosen}
@@ -288,18 +362,22 @@ def build_examples(
 ) -> tuple[list[TrainingExample], Counter]:
     rng = random.Random(config.seed)
     stats: Counter = Counter()
-    usable = {}
+    # (ticker, split) -> usable chunks. A train company with `dev_items` has two groups.
+    groups: dict[tuple[str, str], list[Chunk]] = {}
     for ticker in sorted(chunks_by_ticker):
         if config.split_of(ticker) is None:
             stats["companies_not_in_any_split"] += 1
             continue
         kept = [c for c in chunks_by_ticker[ticker] if c.chunk_id not in excluded_chunks]
         stats["chunks_excluded_as_gold"] += len(chunks_by_ticker[ticker]) - len(kept)
-        usable[ticker] = kept
+        for split in SPLITS:
+            part = [c for c in kept if config.split_of(ticker, c.item) == split]
+            if part:
+                groups[(ticker, split)] = part
     examples: list[TrainingExample] = []
     seen: set[tuple[str, str]] = set()
 
-    def add(seed: Seed, label: str, claim: str, evidence: Chunk, rule: str) -> None:
+    def add(seed: Seed, split: str, label: str, claim: str, evidence: Chunk, rule: str) -> None:
         if claim_key(claim) in gold_claims:
             stats["examples_dropped_gold_claim"] += 1
             return
@@ -310,7 +388,7 @@ def build_examples(
         examples.append(
             TrainingExample(
                 example_id=f"{seed.chunk.ticker}-{len(examples):06d}",
-                split=config.split_of(seed.chunk.ticker),
+                split=split,
                 ticker=seed.chunk.ticker,
                 label=label,
                 claim=claim,
@@ -319,39 +397,73 @@ def build_examples(
                 seed_chunk_id=seed.chunk.chunk_id,
                 seed_kind=seed.kind,
                 rule=rule,
+                seed_item=seed.chunk.item,
+                evidence_ticker=evidence.ticker,
+                evidence_item=evidence.item,
             )
         )
 
-    for ticker, chunks in usable.items():
-        split = config.split_of(ticker)
-        same_split = [t for t in usable if t != ticker and config.split_of(t) == split]
-        for seed in company_seeds(chunks, config, rng):
+    for (ticker, split), chunks in groups.items():
+        # Chunks of the other companies in the same split (same split: no leakage).
+        others = [c for (t, s), part in groups.items() if s == split and t != ticker for c in part]
+        held_out = split == "dev" and ticker in config.dev_items
+        limit = config.max_dev_seeds_per_company if held_out else config.max_seeds_per_company
+        for seed in company_seeds(chunks, config, rng, limit):
             claim, evidence = seed.claim, seed.chunk
             rewrite = None
             if rng.random() < config.supported_rewrite_rate:
                 rewrite = apply_first(SUPPORTED_REWRITES, claim, evidence.text, rng)
             if rewrite:
-                add(seed, "supported", rewrite[1], evidence, rewrite[0])
+                add(seed, split, "supported", rewrite[1], evidence, rewrite[0])
             else:
-                add(seed, "supported", claim, evidence, "seed")
+                add(seed, split, "supported", claim, evidence, "seed")
             contradicted = apply_first(CONTRADICTING_REWRITES, claim, evidence.text, rng)
             if contradicted:
-                add(seed, "contradicted", contradicted[1], evidence, contradicted[0])
+                add(seed, split, "contradicted", contradicted[1], evidence, contradicted[0])
             else:
                 stats["seeds_without_contradiction"] += 1
-            use_other_company = same_split and rng.random() < config.other_company_rate
-            if use_other_company:
-                pool = [c for t in same_split for c in usable[t]]
-                rule = "other_company"
-            else:
-                pool = [c for c in chunks if c.item != seed.chunk.item]
-                rule = "other_section"
-            partner = partner_for(seed, pool, rng, config.partner_candidates) if pool else None
+            pools = {
+                "other_company": others,
+                "other_section": [c for c in chunks if c.item != seed.chunk.item],
+            }
+            first = "other_company" if rng.random() < config.other_company_rate else "other_section"
+            second = "other_section" if first == "other_company" else "other_company"
+            partner, rule = None, first
+            for rule in (first, second):  # the other kind if the first has no candidate
+                if pools[rule]:
+                    partner = partner_for(seed, pools[rule], rng, config.partner_candidates)
+                if partner is not None:
+                    break
             if partner is not None:
-                add(seed, "unsupported", claim, partner, rule)
+                add(seed, split, "unsupported", claim, partner, rule)
             else:
                 stats["seeds_without_partner"] += 1
     return examples, stats
+
+
+def items_by_split(examples: list[TrainingExample]) -> dict[str, dict[str, list[str]]]:
+    """{split: {ticker: [Items used, as seed or as evidence]}}."""
+    used: dict[str, dict[str, set[str]]] = {split: {} for split in SPLITS}
+    for e in examples:
+        used[e.split].setdefault(e.ticker, set()).add(e.seed_item)
+        used[e.split].setdefault(e.evidence_ticker or e.ticker, set()).add(e.evidence_item)
+    return {
+        split: {t: sorted(items) for t, items in sorted(by_ticker.items())}
+        for split, by_ticker in used.items()
+    }
+
+
+def check_item_disjoint(examples: list[TrainingExample]) -> None:
+    """No (company, Item) pair may be used by two splits, as seed or as evidence."""
+    owner: dict[tuple[str, str], str] = {}
+    for split, by_ticker in items_by_split(examples).items():
+        for ticker, items in by_ticker.items():
+            for item in items:
+                other = owner.setdefault((ticker, item), split)
+                if other != split:
+                    raise ConfigError(
+                        f"split leak: {ticker} Item {item} is used by both {other} and {split}"
+                    )
 
 
 # --- Files ----------------------------------------------------------------------------
@@ -380,9 +492,26 @@ def build_training_data(
     missing = sorted(configured - set(chunks_by_ticker))
     if not set(config.splits["train"]) & set(chunks_by_ticker):
         raise ConfigError(f"none of the train companies {config.splits['train']} has chunks")
-    gold_chunks, gold_claims = gold_exclusions(gold_paths)
-    excluded = gold_chunks | candidate_chunk_ids(candidates_dir)
+    gold = gold_exclusions(gold_paths)
+    gold_chunks, gold_claims = gold.chunk_ids, gold.claims
+    by_id = gold_chunks | candidate_chunk_ids(candidates_dir)
+    by_span = chunks_sharing_gold_spans(chunks_by_ticker, gold.spans, by_id)
+    excluded = by_id | by_span
     examples, stats = build_examples(chunks_by_ticker, config, excluded, gold_claims)
+    check_item_disjoint(examples)
+    if not any(e.split == "dev" for e in examples):
+        raise ConfigError(
+            "the dev split is empty: the dev companies or the dev_items of the train "
+            "companies have no usable chunks (check the Item names in the training config)"
+        )
+    have = {(c.ticker, c.item) for chunks in chunks_by_ticker.values() for c in chunks}
+    dev_items_missing = sorted(
+        f"{t} Item {i}"
+        for t, items in config.dev_items.items()
+        if t in chunks_by_ticker
+        for i in items
+        if (t, i) not in have
+    )
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     for split in SPLITS:
@@ -401,9 +530,15 @@ def build_training_data(
             t: sha256_or_none(Path(chunks_dir) / f"{t}.jsonl") for t in sorted(chunks_by_ticker)
         },
         "gold_files": {str(p): sha256_or_none(p) for p in gold_paths},
+        "gold_files_missing": gold.missing,
         "gold_claims_excluded": len(gold_claims),
         "gold_chunks_excluded": len(gold_chunks),
-        "candidate_chunks_excluded": len(excluded - gold_chunks),
+        "candidate_chunks_excluded": len(by_id - gold_chunks),
+        "gold_spans_matched_on": len(gold.spans),
+        "gold_spans_too_short_to_match": gold.short_spans,
+        "chunks_excluded_sharing_gold_span": len(by_span),
+        "dev_items_without_chunks": dev_items_missing,
+        "items_by_split": items_by_split(examples),
         "counts_by_split_and_label": counts,
         "counts_by_rule": dict(sorted(Counter(e.rule for e in examples).items())),
         "stats": dict(sorted(stats.items())),

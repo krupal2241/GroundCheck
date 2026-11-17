@@ -217,11 +217,12 @@ def test_training_config_rules():
     with pytest.raises(ValueError, match="train split"):
         TrainingConfig(splits={"dev": ["A"]})
     committed = load_training_config()  # config/training.yaml
-    seen = committed.splits["train"] + committed.splits["dev"]
+    seen = committed.splits["train"] + committed.splits.get("dev", [])
     # No company with hand-labeled questions is used for training or model selection.
     labeled = {c.ticker for c in load_companies().companies if c.role == "labeled"}
     assert not labeled & set(seen)
-    assert committed.splits["train"] == ["JPM"] and committed.splits["dev"] == ["BRK-B"]
+    assert committed.splits["train"] == ["JPM", "BRK-B"]
+    assert set(committed.dev_items) == {"JPM", "BRK-B"}  # dev: held-out Items of both
     assert set(committed.splits["test"]) == labeled
 
 

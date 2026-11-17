@@ -94,6 +94,8 @@ def compute_metrics(eval_prediction) -> dict[str, float]:
 def model_card(settings: dict, metrics: dict, manifest: dict) -> str:
     counts = manifest.get("counts_by_split_and_label", {})
     splits = manifest.get("config", {}).get("splits", {})
+    held_out = manifest.get("config", {}).get("dev_items", {})
+    dev_items = "; ".join(f"{t} Items {', '.join(items)}" for t, items in held_out.items())
     lines = [
         f"# GroundCheck verifier ({settings['base_model']}, fine-tuned)",
         "",
@@ -113,11 +115,15 @@ def model_card(settings: dict, metrics: dict, manifest: dict) -> str:
         f"{manifest.get('gold_chunks_excluded', 0)} gold chunks, "
         f"{manifest.get('candidate_chunks_excluded', 0)} further candidate chunks).",
         "",
-        "Splits are by company:",
+        "Splits are by company; dev is held-out Items of the training companies "
+        f"({dev_items or 'none'}), disjoint from train by Item:",
         "",
     ]
     for split in ("train", "dev", "test"):
-        tickers = ", ".join(splits.get(split, [])) or "none"
+        tickers = ", ".join(splits.get(split, []))
+        if split == "dev" and dev_items:
+            tickers = "; ".join(x for x in (tickers, dev_items) if x)
+        tickers = tickers or "none"
         by_label = counts.get(split, {})
         total = sum(by_label.values())
         detail = ", ".join(f"{k} {v}" for k, v in sorted(by_label.items()))
@@ -162,7 +168,9 @@ def model_card(settings: dict, metrics: dict, manifest: dict) -> str:
         "- Supported claims are mostly near-verbatim sentences, so paraphrased LLM claims "
         "are harder for the model than the synthetic dev/test sets suggest.",
         "- Each chunk is judged on its own: a claim needing two chunks can't be supported.",
-        "- English 10-K filings of eight large US companies only.",
+        "- English 10-K filings of eight large US companies only; trained on two of them.",
+        "- Dev is held-out Items of the two training companies, so dev scores are "
+        "optimistic; it is only used to pick the epoch.",
         "",
     ]
     return "\n".join(lines)
@@ -188,7 +196,9 @@ def train(args: argparse.Namespace) -> dict:
     if len(train_examples) < MIN_TRAINING_EXAMPLES and not args.limit_train:
         print(
             f"WARNING: only {len(train_examples)} training example(s) (fewer than "
-            f"{MIN_TRAINING_EXAMPLES}); the fine-tuned verifier will be weak."
+            f"{MIN_TRAINING_EXAMPLES}); the fine-tuned verifier will be weak. Check the "
+            "warnings of `groundcheck build-training-data` (a train company without "
+            "chunks, or too many dev_items)."
         )
     transformers.set_seed(args.seed)
     out = Path(args.out)
