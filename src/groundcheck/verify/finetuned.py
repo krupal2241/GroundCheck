@@ -10,7 +10,13 @@ from pathlib import Path
 from typing import Any
 
 from groundcheck.verify.base import LABELS, BaseVerifier, EvidenceChunk, Verification, VerifierError
-from groundcheck.verify.hf import MAX_LENGTH, import_torch_stack, pick_device, runtime_version
+from groundcheck.verify.hf import (
+    MAX_LENGTH,
+    import_torch_stack,
+    pick_device,
+    runtime_version,
+    truncation_details,
+)
 from groundcheck.verify.spans import best_unit_span
 
 
@@ -63,6 +69,9 @@ class FineTunedVerifier(BaseVerifier):
             "device": self.device,
             "runtime": self.runtime,
         }
+
+    def _untimed_details(self, claim: str, chunks: list[EvidenceChunk]) -> dict[str, Any]:
+        return truncation_details(self.tokenizer, chunks, claim, self.max_length)
 
     def chunk_probs(self, claim: str, texts: list[str]) -> list[dict[str, float]]:
         torch = self._torch

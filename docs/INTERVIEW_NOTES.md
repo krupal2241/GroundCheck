@@ -136,12 +136,15 @@ perturbations as contradicted, the same claim with an on-topic different chunk a
 unsupported. Every chunk retrieved for any candidate and every gold claim is excluded
 in code, and splits are by company.
 
-**Why train only on JPM?**
+**Why train only on JPM and BRK-B?**
 Earlier I trained on two labeled companies too. Excluding gold chunks prevents literal
 leakage, but the rest of the same filing still teaches the model that company's
-vocabulary and table layouts. Now no labeled company is in train or dev (BRK-B is dev),
-so the gold score is on unseen companies. The cost is less variety, and the tooling
-warns below 500 training examples.
+vocabulary and table layouts. Now no labeled company is in train or dev, so the gold
+score is on unseen companies. For a while train was JPM alone with BRK-B as dev; an
+audit showed that left no second company for cross-company negatives, so both now
+train and dev is held-out Items of those two filings, checked to be disjoint by Item.
+The cost is less variety and a dev set that is not independent of train (it only picks
+the epoch); the tooling warns below 500 training examples.
 
 **Will the synthetic scores carry over?**
 No. The model learns the perturbation rules; synthetic dev/test scores overstate real

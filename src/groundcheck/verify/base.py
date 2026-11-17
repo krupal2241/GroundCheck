@@ -95,7 +95,16 @@ class BaseVerifier:
             # Nothing to judge against: by definition there is no supporting evidence.
             result = Verification(label="unsupported", score=0.0, details={"no_chunks": True})
         elapsed_ms = (time.perf_counter() - started) * 1000
-        return result.model_copy(update={"latency_ms": round(elapsed_ms, 3)})
+        update: dict[str, Any] = {"latency_ms": round(elapsed_ms, 3)}
+        # Bookkeeping that is not part of the check (e.g. counting truncated inputs)
+        # runs after the clock stops, so it never shows up in the latency numbers.
+        extra = self._untimed_details(claim, list(chunks)) if chunks else {}
+        if extra:
+            update["details"] = {**result.details, **extra}
+        return result.model_copy(update=update)
+
+    def _untimed_details(self, claim: str, chunks: list[EvidenceChunk]) -> dict[str, Any]:
+        return {}
 
     def _verify(self, claim: str, chunks: list[EvidenceChunk]) -> Verification:
         raise NotImplementedError

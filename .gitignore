@@ -39,3 +39,4 @@ models/
 # Coverage data
 .coverage
 htmlcov/
+.hypothesis/

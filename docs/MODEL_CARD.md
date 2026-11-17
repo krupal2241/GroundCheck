@@ -30,18 +30,21 @@ Built by `groundcheck build-training-data` from the committed chunks
   Item of the same company or another company in the same split) that contains none of
   its numbers.
 
-**Splits by company** (no company's text crosses splits):
+**Splits by company, and inside the two training companies by Item** (the build fails
+if any company-Item pair is used by two splits):
 
-| Split | Companies | Use |
+| Split | Source | Use |
 |---|---|---|
-| train | JPM | fitting |
-| dev | BRK-B | choosing the epoch |
+| train | JPM and BRK-B, every Item except the dev Items | fitting |
+| dev | held-out Items of the same two filings: JPM Items 1 and 5, BRK-B Item 7 | choosing the epoch |
 | test (synthetic) | AAPL, MSFT, AMZN, WMT, XOM, JNJ | synthetic sanity check |
 
 No company with hand-labeled questions is used for training or model selection, so the
-gold-set score measures companies the model has never seen. In addition, every chunk
-retrieved for any candidate (in any mode) and every gold claim is removed from all
-splits. A warning is printed when the train split has fewer than 500 examples.
+gold-set score measures companies the model has never seen (wrong-context generation
+never borrows JPM or BRK-B passages either). In addition, every chunk retrieved for
+any candidate (in any mode), every other chunk that contains a gold evidence span, and
+every gold claim is removed from all splits. A warning is printed when the train split
+has fewer than 500 examples.
 
 ## Intended use
 
@@ -57,11 +60,15 @@ A research baseline, not a production fact-checker.
   `docs/RESULTS.md` say how it does on real hallucinations.
 - **Label noise** from the rules (an inserted "not" that reads oddly, a different
   section that restates the same fact in words) caps what the synthetic data can teach.
-- **One training company.** Training only on JPM keeps the evaluation honest but gives
-  little variety in filing style (a bank's vocabulary and tables).
+- **Two training companies.** Training only on JPM and BRK-B keeps the evaluation
+  honest but gives limited variety in filing style (a bank and a conglomerate).
+- **Dev is not independent of train.** It is held-out Items of the same two filings,
+  and an MD&A repeats figures from the financial statements, so dev scores are
+  optimistic. Dev only picks the epoch.
 - **Single-chunk evidence.** A claim whose two numbers sit in different chunks can't be
   supported by any one (chunk, claim) pair.
-- **512 tokens.** Long chunks are truncated (only the evidence side).
+- **512 tokens.** Long chunks are truncated (only the evidence side); `eval-verifiers`
+  reports how many (chunk, claim) inputs were.
 - **English 10-K text only.**
 
 ## Metrics

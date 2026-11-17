@@ -1037,8 +1037,10 @@ exclude (e.g. the gold files weren't pushed before running on Colab).
 split, and `other_company` partners come from the same split, so no evidence text
 crosses splits either. *Original default (Part 3):* train JPM, BRK-B, AAPL, MSFT; dev
 AMZN; test WMT, XOM, JNJ. **Changed in Overnight Part 1** to train JPM, dev BRK-B, test
-the six labeled companies: see "Claim-splitting quality" below for why. All gold
-passages are excluded from training regardless of the split.
+the six labeled companies: see "Claim-splitting quality" below for why. **Changed
+again by the audit fixes** to train JPM and BRK-B, with dev taken from held-out Items of
+those two: see "Audit fixes" at the end. All gold passages are excluded from training
+regardless of the split.
 
 **Training** (`training/train.py`, `scripts/train_verifier.py`): Hugging Face `Trainer`
 on `microsoft/deberta-v3-small` (a strong small encoder for NLI-style pair tasks;
@@ -1161,9 +1163,14 @@ million in 2024" are both kept); contains "passage [n]" or a bare "[n]"; or cont
 number that is not in the answer (commas and trailing zeros normalized, so "$12,345"
 matches "12345"). A year counts as a number, so a claim that adds "fiscal 2024" to an
 answer that only says "the previous year" is rejected: that's an added fact.
+*(Extended later: claims about the passages or the model are rejected, opposite claims
+are never near-duplicates, and numbers are compared by value, so "$89.3 billion"
+matches "$89,300 million". See "Audit fixes", findings 8 and 9, and "Financial-number
+handling".)*
 
 **Retries:** if any claim is rejected (or the list is empty for an answer that isn't
-the abstention sentence), the request is re-sent with a stricter message: the original
+an abstention; since the audit fixes that is any answer made only of statements about
+the passages or the model, not just the exact sentence), the request is re-sent with a stricter message: the original
 prompt, then every rejected claim with its reasons, then the hard rules restated. At
 most 3 retries (`claim_max_retries` in `config/llm.yaml`); each attempt still has the
 JSON-level retries of `generate_structured`. The attempt with the most valid claims
@@ -1199,6 +1206,9 @@ records out of every label breakdown; `label-check` validates them like any reco
 claim must exist with the same text; an invalid record with a label is an error). *Why
 a record and not a deletion:* the claim stays in the candidates file (append-only), so
 without a record `--only-unlabeled` would show it again forever.
+
+*(Superseded by "Audit fixes", finding 11: train is now JPM and BRK-B, dev is their
+held-out Items. The reasoning about labeled companies below still holds.)*
 
 **Training split changed (`config/training.yaml`): train JPM, dev BRK-B, test the six
 labeled companies.** The earlier split trained on AAPL and MSFT and used AMZN for model
@@ -1250,9 +1260,10 @@ are the distribution a deployed verifier would face.
   the realistic failure: an answer stitched from the wrong evidence.
 - **`--wrong-context-source mixed`** (default) picks per question, by a sha256 of the
   question ID (deterministic, unlike Python's salted `hash`), between another company
-  and another Item. The other company is also chosen by hash among every company that
-  has an index (JPM and BRK-B included: they make good wrong context precisely because
-  nobody labels them). If one kind is impossible (no other index, or every deep hit is
+  and another Item. The other company is also chosen by hash among the **labeled**
+  companies that have an index. (Originally JPM and BRK-B were included; the audit
+  fixes removed them, because they train the fine-tuned verifier: "Audit fixes",
+  finding 2.) If one kind is impossible (no other index, or every deep hit is
   from the correct Items) the other is used; if both are, the question is reported as
   failed and retried on the next run. "Other Item" searches the top 60 of the same
   company's ranking and keeps the best chunks whose Item differs from all of the correct
@@ -1325,7 +1336,7 @@ The risk and the rules for using `--suggest` are in `docs/labeling_guide.md`.
 
 **`groundcheck pipeline`** runs download, parse, chunk, index, eval-retrieval,
 generate (all three modes by default, `--modes` to choose), export-labels,
-eval-verifiers (`--verifiers`, default prompted, hhem, minicheck), error-report and
+eval-verifiers (`--verifiers`, default numeric, prompted, hhem, minicheck), error-report and
 report, in that order; `--from` and `--to` pick a contiguous range, `--list` prints the
 stages. Each stage calls the same entry point as its standalone command (the CLI's
 `main`, or `generate_candidates.py`'s `main`), so there is exactly one implementation of
@@ -1489,9 +1500,11 @@ retrieval"). It costs a model call per chunk and adds non-determinism; a templat
 costs nothing.
 
 **BM25** is written here (`bm25.py`, about 60 lines, numpy only): Okapi BM25, `k1 = 1.5`,
-`b = 0.75`, Lucene's non-negative IDF. It uses the same tokenizer as the hashing
+`b = 0.75`, Lucene's non-negative IDF. It originally used the same tokenizer as the hashing
 embedder, which keeps `64,377` and `2025` as single tokens, plus a short stopword list
-for question words. It is built in memory from the chunks when a retriever opens (a few
+for question words. (Since the audit fixes BM25 has its own tokens: numbers are
+canonical, so `64,377` is the token `64377`, and letters and digits are split; see
+"Audit fixes", finding 14.) It is built in memory from the chunks when a retriever opens (a few
 thousand chunks: well under a second). *Why not `rank-bm25`:* one more dependency for
 something this small, and its tokenization would be ours anyway. *Why BM25 at all:*
 10-K questions are full of exact terms that a small embedding model blurs: product
@@ -1590,8 +1603,9 @@ built in parallel. Where they meet:
   (or `--variant`), so `retrieved`, the labeling evidence, comes from the same retriever
   in every mode, and every record stores `retrieval.variant` and `retrieval.retriever`.
   `wrong-context` draws its mismatched passages through the same retriever: the
-  "other company" pool is every company that variant can search right now (its index
-  for that embedding exists, or any company with chunks for a BM25-only variant), and
+  "other company" pool is every *labeled* company that variant can search right now
+  (its index for that embedding exists, or its chunks for a BM25-only variant; JPM and
+  BRK-B are excluded since the audit fixes), and
   "other Item" asks the same retriever for its top 60. A hybrid or reranking variant
   therefore also ranks the wrong context; a test runs all three modes with a hybrid
   (headers + BM25 + RRF + reranker) and a BM25-only variant on the offline fakes.
@@ -1619,3 +1633,305 @@ built in parallel. Where they meet:
   report.
 - **Index loading stays lazy:** the variant-aware `CompanyIndex.load` still imports
   faiss only when an index is built or read (the OpenMP clash from Part 0).
+
+## Audit fixes (branch `audit-fixes`), Tier 1
+
+A read-only audit looked for bugs and validity problems that would make the evaluation
+results wrong or misleading. It found no high-severity bug and fifteen findings; this
+section records what was changed for each (finding 15, reproducibility notes, was
+skipped on request). Every fix has a regression test that reproduces the audit's
+example: `tests/test_audit_before_labeling.py`, `tests/test_audit_evaluation.py`,
+`tests/test_audit_training_retrieval.py`. Nothing here was run with a real model; what
+that leaves open is listed under "Needs verification on a Mac".
+
+### Before labeling
+
+- **Finding 5, label-suggestion anchoring reaches the evaluation.** `LabelRecord` has a
+  new append-only `suggestion_history`. Labeling a claim again moves the old
+  `assistance` into the history if it showed a label suggestion, so a later pass
+  without `--suggest` can no longer erase "a suggestion was shown". Pressing Enter to
+  keep a label while a suggestion is on screen appends an entry with
+  `kept_existing: true` (the label and its `assistance` are untouched). The gold export
+  now carries `assistance`, `suggestion_history`, `label_suggestion_shown`,
+  `suggestion_verifiers` and `evidence_source` (`suggestion_accepted`, `hand_pasted` or
+  `none`). `label-stats` counts a label as "with suggestion" if one was *ever* shown.
+  *Limit:* `evidence_source` is per label, not per span: a label whose first span was
+  the accepted suggestion and whose second was pasted counts as `suggestion_accepted`.
+- **Finding 8, abstentions.** `is_abstention` no longer needs the exact sentence: an
+  answer is an abstention when every sentence of it is a *meta statement*, i.e. about
+  the passages or the model rather than the company (`claims.META_RE`: "the passages do
+  not contain ...", "Apple does not have information about ...", "I cannot determine
+  ...", "... is not mentioned in the passages"). An abstention keeps no claims and is
+  not re-asked ("You returned no claims, but the ANSWER states facts" pushed a 3B model
+  to invent some). The validator rejects any single claim that matches `META_RE`
+  (validator version `claims-validator-v2`). An answer that abstains and then states a
+  fact is not an abstention; its meta sentence is dropped as a claim and the fact kept.
+  *Limit:* the patterns are a list, not a classifier. Company facts that happen to be
+  negative ("Apple did not pay a dividend", "has no employees covered by ...", "was not
+  available in China") are tested to pass; "The Company's effective tax rate was not
+  provided" is rejected as meta, which is right for an LLM answer but would be wrong for
+  a sentence copied from a filing.
+- **Finding 9, opposite claims.** `near_duplicate` returns False when the words two
+  claims differ in include a direction word (`DIRECTION_WORDS`: increased/decreased,
+  higher/lower, gain/loss, ...) or a negation (`NEGATION_WORDS`, `n't`, `non-`). Before,
+  "net sales increased 4% ..." and "net sales decreased 4% ..." (same numbers, Jaccard
+  0.8) were merged and the contradicting half never reached labeling.
+- **Finding 10, the resume guard.** `_refuse_mixed_settings` (was
+  `_refuse_mixed_variants`) compares, for every record a resume would skip: retrieval
+  variant, `prompt_version`, `top_k`, embedder and the retriever description (which
+  contains pool, rrf_k and the reranker). A smoke run with `--embedder hashing` under
+  the variant name `hybrid` is now refused instead of being silently mixed in. A record
+  without a field (written before the field existed) is not compared on it.
+- **Finding 2, wrong-context companies.** "Another company's passages" come only from
+  `role: labeled` companies (`runner.wrong_context_companies`). JPM (`unlabeled`) and
+  BRK-B (`stress_test`) are never used, even if indexed, so a gold claim can no longer
+  restate a filing the fine-tuned verifier trained on. With no other labeled company
+  indexed the picker falls back to another Item, and fails loudly if that is impossible.
+
+### Evaluation (`verify/evaluate.py`, `report/build.py`)
+
+- **Finding 1, binary verifiers in breakdowns.** `GroupMetrics` stores `binary_correct`
+  and `binary_accuracy` (supported vs not supported) next to the three-way numbers, for
+  every breakdown. `verifier_eval.md` shows both columns; `RESULTS.md`, the README
+  tables and the edge-case chart show supported-vs-not accuracy for binary verifiers
+  (marked †) and three-way accuracy for the others. Before, MiniCheck showed 0% on a tag
+  whose claims are all contradicted even when it rejected every one of them.
+  *Limit:* a † cell and a three-way cell in the same row are not the same metric; the
+  footnote says so. The per-verifier sections have both columns for a like-for-like read.
+- **Finding 4, evidence agreement.** Reported overall and separately for gold spans
+  that were the accepted one-key suggestion vs hand-pasted spans
+  (`evidence_agreement_by_source`). The suggestion and the cross-encoder verifiers' span
+  picker are the same lexical rule (`spans.overlap_score`), so only the hand-pasted
+  figure measures agreement independently.
+- **Finding 5, breakdown by suggestion.** `by_suggestion` groups predictions by
+  "not shown" and "shown: <verifier(s)>". A verifier's section warns when labels were
+  made with its own suggestion on screen.
+- **Finding 6, parse errors.** `accuracy_parse_errors_wrong` and
+  `binary_accuracy_parse_errors_wrong` count every parse error as a wrong prediction;
+  they are printed next to the usual accuracy whenever a verifier has parse errors.
+- **Finding 7, subset runs.** Each row stores `claims_sha256` (a hash of the claim IDs
+  it evaluated) and `gold_total`. The reports print n per row and warn when rows differ
+  in n or in the hash; `eval-verifiers --company/--limit` prints a note.
+- **Finding 13, truncation.** MiniCheck and the fine-tuned verifier count the
+  (chunk, claim) inputs longer than `max_length` tokens (`hf.count_truncated`,
+  tokenizing once more without truncation). The count runs after the latency clock
+  stops (`BaseVerifier._untimed_details`), so it does not change latency. Reported as
+  "x of y inputs, z claims affected". HHEM truncates inside its own `predict` and
+  exposes no count, so it reports none.
+
+### Training and retrieval
+
+- **Finding 11, training split.** Train is JPM and BRK-B; dev is held-out Items of
+  those two (`dev_items` in `config/training.yaml`: JPM Items 1 and 5, BRK-B Item 7);
+  test stays the six labeled companies. With JPM alone, `other_company_rate` did
+  nothing, because there was no second company in the train split. `TrainingConfig`
+  validates `dev_items` (train companies only, distinct Items, a dev set must exist),
+  `check_item_disjoint` fails the build if any (company, Item) pair is used by two
+  splits as seed *or* as evidence, and an empty dev split is an error. Unsupported
+  partners come from the same split; if the chosen kind (other company / other section)
+  has no candidate, the other is tried. The manifest lists `items_by_split`.
+  *Limits:* dev is the same two companies as train, and an MD&A repeats figures from
+  the statements, so dev scores are optimistic; dev only picks the epoch. Unsupported
+  partners still never share a number with the claim (the "no number overlap means
+  unsupported" shortcut the audit noted is unchanged).
+  *How the dev Items were chosen:* by chunk counts per Item (BRK-B Item 7: 79 prose and
+  30 table chunks; JPM Items 1 and 5: 30 prose and 5 table chunks), keeping JPM's much
+  larger Items 7 and 8 in train.
+- **Finding 12, missing gold files.** `gold_files_missing` in the manifest, and one
+  WARNING per missing path from the command (before: silent unless nothing at all was
+  excluded).
+- **Finding 3, span-based exclusion.** Besides chunk IDs, every chunk whose normalized
+  text contains a gold evidence span of at least 12 characters is excluded
+  (`chunks_sharing_gold_spans`): overlap neighbours, the other part of a split window,
+  the same table row in another Item. Counted in the manifest
+  (`chunks_excluded_sharing_gold_span`, `gold_spans_too_short_to_match`).
+  *Limit:* spans shorter than 12 characters ("$12,345") are not matched on, since they
+  occur in too many chunks; passages retrieved for a candidate but not cited as
+  evidence are still excluded by ID only.
+- **Finding 14, BM25 tokens.** BM25 has its own token pattern now: thousands
+  separators are removed ("12,345" = "12345"), a comma joins digits only when exactly
+  three follow ("2025,2024" is two tokens), and letters and digits are split ("FY2025"
+  gives "fy", "2025"). Measured on the 30 retrieval questions: **no change** (BM25
+  recall@5 0.62, hybrid 0.63, before and after). The questions are plain English and
+  contain no such tokens, so this fixes a real mismatch that this eval cannot see.
+
+## Financial-number handling (`finnum.py`, `verify/numeric.py`, BM25 flags), Tier 2
+
+Table questions score worst in retrieval, and "units and scale" is a labeling edge
+case, so numbers get one shared parser instead of three regular expressions.
+
+### (a) One module for numbers: `groundcheck/finnum.py`
+
+`parse_quantities(text)` returns a `Quantity` per number: `raw` (as written, sign
+applied), `scale` / `scale_stated` (thousand, million, billion, trillion, or "$1.2B"),
+`value` = raw x scale, `kind` (currency, percent, count, year), `decimals`, and
+`range_role` for the two ends of a range. It reads "$89.3 billion", "89,300 million",
+"4%", "(1,234)" as negative, "$391.0", "$25 billion to $27 billion", "between $25 and
+$27 billion" (the first number inherits the scale), "fiscal 2025", "FY2025" and "FY25".
+
+`same_number(a, b)` compares values. Modes: `rounding` (the project's rounding rule:
+"$12.3 billion" matches "12,345 million", "$12.4 billion" does not), `implied` (a
+table cell without a scale may be in units, thousands, millions or billions; `hint`
+from `scale_hint`, e.g. "(in millions)", narrows it to one), `raw_ok` (equal as
+written), `signed` (signs are ignored otherwise: "(4)%" is "decreased 4%").
+
+Where it is used, and what changed there:
+
+- **Claim filter** (`generation/claims.py`): a claim's number passes if the answer has
+  the same value ("$89.3 billion" vs "$89,300 million") or the same number as written
+  (as before). So the check is strictly more permissive than before, by scale
+  equivalence only. Near-duplicate detection compares numbers by value and ignores how
+  they are written.
+- **BM25 tokens** (`retrieval/bm25.py`): number tokens are canonical
+  (`finnum.number_token`: "12,345" = "12345", "391.0" = "391").
+- **Evidence-span suggestion and the verifiers' span picker** (`verify/spans.py`,
+  `labeling/assist.py`): `overlap_score` counts a claim number as present when the unit
+  has the same value under `rounding` + `implied` (+ the chunk's scale note). A claim's
+  "$89.3 billion" now finds the row "Share repurchases | 89,300 | 77,550" (in millions).
+  *Consequence for finding 4:* the suggestion and the span picker still share one rule.
+
+*Limits:* "percent" and "percentage points" are both read as percent, so the labeling
+guide's "rose 2%" vs "rose 2 percentage points" (contradicted) is invisible to anything
+built on this module; a bare four-digit integer between 1900 and 2099 is a year even
+when it is a count; "(4)" after a word is a footnote marker, not minus four, unless it fills a table
+cell; spelled-out numbers, non-dollar currencies and "basis points" are not parsed; a
+range is two numbers, not an interval (no "26 is within 25 to 27"). Property-based
+tests found and fixed two bugs while this was written (formatting noise past 12
+significant digits, a non-idempotent token for malformed input).
+
+### (b) `NumericVerifier` (`verify/numeric.py`, `--verifier numeric`)
+
+A fourth, nearly free baseline on the `Verifier` interface: no model, microseconds per
+claim. It checks the claim's numbers (years aside) against the passages:
+
+- table rows: the row label is the context, each cell a fact, the cell's period the
+  year in its column header; prose: the sentence is the context, a number's period the
+  nearest year;
+- **supported** if every claim number is found in a matching context for the same
+  period (unit-normalized, with rounding tolerance);
+- **contradicted** if a number is missing but a matching context has a different number
+  of the same kind for the same period, or a table cell's sign disagrees with the
+  claim's direction word;
+- **unsupported** otherwise, and for **every claim without a number** (it has no
+  opinion there; `details["no_numbers"]`).
+
+*Limits, stated plainly:* it does not read. A matching number, period and row label is
+"supported" whatever the sentence says about it. Direction and negation are checked
+only against signed table cells. Derived numbers (a difference, a growth rate the
+passage does not print) are not computed. Context is word overlap, so a different
+metric with similar words can give a false "contradicted". Without a scale note a
+scale error against a bare table cell is invisible. Its recall on supported claims
+without numbers is zero by construction. It is the floor a model must beat on numeric
+claims, not a competitor on the rest; read it per edge-case tag.
+
+It is in `VERIFIER_NAMES`, so `eval-verifiers --verifier numeric ...` reports it in the
+same tables as the model verifiers. It has not been run on a gold set (none exists yet).
+
+### (c) Numeric aliases in the BM25 query (`number_aliases`, off by default)
+
+`finnum.expand_query` appends, for each number in the question, the same amount at
+other scales ("$89.3 billion" -> 89300, 89300000, 89300000000) and, for a table-style
+number, the next scale up ("12,345" -> 12.345, 12.3). Only the BM25 query is expanded;
+the dense model and the reranker read the question as written. Thousands-separator
+variants need no alias: BM25 tokens are already canonical.
+
+### (d) Table captions for BM25 (`table_context`, off by default)
+
+Every table chunk already repeats its column header rows, including parts split to fit
+the token limit (tested). What a table chunk lacks is its title. `groundcheck chunk
+--table-captions` records, for each table chunk, the last sentence of the nearest
+preceding non-table line of the filing (with a short unit note such as "(in millions)"
+kept) in a new `Chunk.caption` field. That is metadata: `text`, chunk IDs, gold strings,
+evidence spans and embeddings are unchanged. With `table_context: true` BM25 indexes a
+table chunk as caption + text. `--table-captions-in-text` also writes the caption into
+the chunk text; that changes stored text, renames the chunker (`-cap`) and is opt-in.
+Chunk files written without these flags are byte-identical to before (an empty caption
+is not written), so existing indexes stay valid.
+
+### Measured (30 AI-drafted retrieval questions; one question = 0.03)
+
+| Variant | recall@5 | recall@10 | MRR |
+|---|---:|---:|---:|
+| `bm25` (before Tier 1) | 0.62 | 0.65 | 0.45 |
+| `bm25` (after the tokenizer changes) | 0.62 | 0.65 | 0.45 |
+| `bm25-numbers` (both flags) | 0.62 | 0.65 | 0.45 |
+| `hybrid` (before Tier 1) | 0.63 | 0.68 | 0.47 |
+| `hybrid` (after) | 0.63 | 0.68 | 0.47 |
+| `hybrid-aliases` | 0.63 | 0.68 | 0.47 |
+| `hybrid-numbers` (both flags) | 0.63 | 0.68 | 0.47 |
+
+**Nothing moved, and that is the honest result.** The 30 questions are plain English
+("What were Apple's net sales in Greater China?"): they contain no amounts to expand
+and no "FY2025"-style tokens, and the committed chunks have no captions, so
+`table_context` is a no-op until the filings are chunked again. An earlier version of
+`table_context` also added the Item's section title; that lowered recall@5 (hybrid 0.63
+-> 0.60, BM25 0.62 -> 0.58) and was removed. The table-question recall (0.33 at 5) is
+therefore **not improved by this tier**; whether captions help is listed below as
+unverified. The default variant stays `hybrid`.
+
+## Usability and safety (`doctor.py`, `--cooldown-seconds`, `label-stats`), Tier 3
+
+- **`groundcheck doctor`** checks, without loading a model: Python >= 3.11; each
+  optional extra (by looking for its packages, not importing them); that Ollama answers
+  at the configured URL and has the configured model; free disk space (warn under 5 GB,
+  fail under 1 GB); `SEC_USER_AGENT`; the data folder of every stage, with the command
+  that creates it; and whether any `*_API_KEY` environment variable is set. The last
+  one is a warning with the variable names only (values are never printed) and the
+  `unset` command: the policy is $0, nothing here calls a paid API, and a key in the
+  environment is how one would start to by accident. Exit code 1 only on a `[FAIL]`
+  (wrong Python, almost no disk); warnings exit 0, because an extra you do not use or
+  Ollama being off while you label is fine.
+- **`--cooldown-seconds N`** (default 0) for `groundcheck index` (between companies),
+  `groundcheck eval-verifiers` (between verifiers and after every 25 claims) and
+  `scripts/generate_candidates.py` (between batches; the same as the older
+  `--sleep-between-batches`, the larger of the two wins). The pauses are outside every
+  check and are subtracted from the wall time, so latency and throughput do not change.
+  Recommended on a fanless MacBook Air: generation `--batch-size 5 --cooldown-seconds
+  60` (what `make generate` does); index 30 to 60; eval-verifiers 30. These are starting
+  points from the existing Makefile setting, not measurements.
+- **`groundcheck label-stats`** ends with a one-screen "progress to target": confirmed,
+  valid labels (what `export-labels` writes) per label, company, mode and question type,
+  against an even share of the target (default 300 claims: 100 per label and per mode,
+  50 per labeled company, 60 per answerable question type), how many more each needs,
+  and how many unlabeled claims the candidates still hold for it. `--target N` changes
+  the size, `--summary-only` prints only the summary. Labels cannot be planned (they
+  depend on what the model answered); a short label is a hint to label more no-context
+  or wrong-context candidates.
+- **The pipeline's default verifiers** are now numeric, prompted, hhem, minicheck.
+
+## Needs verification on a Mac
+
+Nothing below could be checked without real models, which were deliberately not run.
+
+1. **Truncation counts with the real tokenizers.** `count_truncated` calls the
+   tokenizer with `truncation=False` on (chunk, claim) pairs; it is tested with a
+   stand-in. Run `groundcheck eval-verifiers --verifier minicheck --limit 20` and check
+   that the "Truncation:" line appears and is plausible (a DeBERTa tokenizer may warn
+   about sequences longer than 512; that warning is expected).
+2. **MiniCheck input format.** The audit could not compare the (chunk, claim) pair
+   encoding with MiniCheck's reference code. Compare a few scores with the `minicheck`
+   package before trusting the MiniCheck row.
+3. **HHEM truncation** is not counted (its `predict` hides it).
+4. **Abstention patterns on real output.** `META_RE` was written from two real answers
+   and a list of likely rewordings. After the next generation run, read the
+   `claim_filter.rejections` whose reason starts with "about the passages" and the
+   candidates with zero claims, and check nothing factual was dropped.
+5. **Training data size with the new split.** Run `groundcheck build-training-data`
+   and check the counts per split and label, the `items_by_split` lines, and that the
+   under-500 warning does not fire. Then retrain: every earlier fine-tuned model was
+   trained on the old split.
+6. **Existing candidates and the new resume guard.** Candidates generated before these
+   fixes carry validator v1 claims; the guard does not compare the validator version.
+   Regenerate (into a fresh `--out-dir` or after moving the old files) before labeling.
+7. **NumericVerifier on real gold labels.** It is tested on synthetic passages only.
+   After labeling, run `groundcheck eval-verifiers --verifier numeric` and read its
+   by-edge-case rows (units_scale, numeric_mismatch, temporal, rounding).
+8. **Table captions on the real filings.** Captions need the filings chunked again,
+   which changes the chunks files and makes every dense index stale. Not done here.
+   `groundcheck chunk --table-captions`, then `groundcheck eval-retrieval --variant
+   bm25-numbers` (needs no index) against `--variant bm25`; if it helps, rebuild the
+   dense index (`groundcheck index --variant hybrid`, heavy) and compare `hybrid-tablectx`.
+   Check a few captions by eye first: the "nearest preceding line" may be a footnote.
+9. **Number aliases on questions that contain amounts.** None of the 30 retrieval
+   questions has one, so the flag is untested on real retrieval. Add a few such
+   questions before deciding.

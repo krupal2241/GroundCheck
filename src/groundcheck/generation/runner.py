@@ -33,7 +33,7 @@ from groundcheck.generation.pipeline import (
     read_candidates,
     run,
 )
-from groundcheck.generation.prompts import fake_responder
+from groundcheck.generation.prompts import PROMPT_VERSION, fake_responder
 from groundcheck.generation.questions import (
     DEFAULT_CANDIDATE_QUESTIONS_PATH,
     collect_questions,
@@ -67,6 +67,15 @@ def build_parser() -> argparse.ArgumentParser:
         default=0.0,
         metavar="SECONDS",
         help="pause between batches (lets a fanless laptop cool down)",
+    )
+    parser.add_argument(
+        "--cooldown-seconds",
+        type=float,
+        default=0.0,
+        metavar="SECONDS",
+        help="the same pause under the name `groundcheck index` and `eval-verifiers` use "
+        "(default 0; the larger of the two options wins). On a fanless laptop try 60 "
+        "with --batch-size 5",
     )
     parser.add_argument(
         "--dry-run",
@@ -124,6 +133,8 @@ def build_parser() -> argparse.ArgumentParser:
 def _run(args: argparse.Namespace) -> int:
     if args.batch_size < 1 or (args.limit is not None and args.limit < 0):
         raise ConfigError("--batch-size must be at least 1 and --limit non-negative")
+    if args.cooldown_seconds < 0 or args.sleep_between_batches < 0:
+        raise ConfigError("--cooldown-seconds and --sleep-between-batches must not be negative")
     companies = load_companies(args.config)
     llm_config = load_llm_config(args.llm_config)
     if args.top_k is not None:
@@ -167,13 +178,17 @@ def _run(args: argparse.Namespace) -> int:
     )  # fmt: skip
     picker = None
     if args.mode == "wrong-context":
-        # Other companies too (any role), for "another company's passages": every company
-        # this variant can search (its index exists, or BM25 alone needs only chunks).
+        # "Another company's passages" come only from the other LABELED companies this
+        # variant can search (its index exists, or BM25 alone needs only chunks). Never
+        # from an unlabeled or stress-test company (JPM, BRK-B): those train the
+        # fine-tuned verifier, and a gold claim restating their filing would break
+        # "evaluated on companies it has never seen" (config/training.yaml).
+        allowed = wrong_context_companies(companies)
         others = [
-            c.ticker
-            for c in companies.companies
-            if c.ticker not in tickers
-            and searchable(c.ticker, spec, retriever.embedder, args.chunks_dir, args.index_dir)
+            t
+            for t in allowed
+            if t not in tickers
+            and searchable(t, spec, retriever.embedder, args.chunks_dir, args.index_dir)
         ]
         if others:
             retriever = open_retriever(
@@ -182,10 +197,22 @@ def _run(args: argparse.Namespace) -> int:
                 reranker=retriever.reranker, device=args.device,
             )  # fmt: skip
         picker = WrongContextPicker(
-            retriever.search, sorted(retriever.companies), args.wrong_context_source
+            retriever.search,
+            sorted(t for t in retriever.companies if t in allowed),
+            args.wrong_context_source,
         )
-    _refuse_mixed_variants(questions, provider, out_dir, variant, args.mode)
     embedder_name = retriever.embedder.name if retriever.embedder is not None else "none"
+    _refuse_mixed_settings(
+        questions,
+        provider,
+        out_dir,
+        args.mode,
+        variant=variant,
+        prompt_version=PROMPT_VERSION,
+        top_k=llm_config.top_k,
+        embedder=embedder_name,
+        retriever=retriever.description,
+    )
     infos = {
         t: RetrievalInfo(
             embedder=embedder_name,
@@ -215,7 +242,7 @@ def _run(args: argparse.Namespace) -> int:
         out_dir,
         batch_size=args.batch_size,
         limit=args.limit,
-        sleep_between_batches=args.sleep_between_batches,
+        sleep_between_batches=max(args.sleep_between_batches, args.cooldown_seconds),
     )
     print(
         f"Wrote {summary.written} candidate(s) with {summary.claims} claim(s); "
@@ -232,22 +259,51 @@ def _run(args: argparse.Namespace) -> int:
     return 1 if summary.failed else 0
 
 
-def _refuse_mixed_variants(
-    questions, provider, out_dir: Path, variant: str, mode: str = "rag"
+def wrong_context_companies(companies) -> set[str]:
+    """Tickers whose passages may be shown as another company's in wrong-context mode:
+    the labeled-role companies only."""
+    return {c.ticker for c in companies.companies if c.role == "labeled"}
+
+
+def _refuse_mixed_settings(
+    questions,
+    provider,
+    out_dir: Path,
+    mode: str = "rag",
+    *,
+    variant: str,
+    prompt_version: str | None = None,
+    top_k: int | None = None,
+    embedder: str | None = None,
+    retriever: str | None = None,
 ) -> None:
     """Resuming skips questions that already have a record for this model and mode. If
-    those records came from another retrieval variant, the output would silently mix two
-    retrievers, so refuse and say how to keep them apart."""
+    those records were made with other settings (retrieval variant, prompt version,
+    top_k, embedder, or retriever stages such as pool and rrf_k), the output would
+    silently mix two pipelines, so refuse and say how to keep them apart. A setting
+    passed as None is not checked; a record that lacks a field (written before the
+    field existed) is not compared on it."""
     wanted = {candidate_id(q.id, provider, mode) for q in questions}
     for ticker in sorted({q.ticker for q in questions}):
-        for record in read_candidates(candidates_path(ticker, out_dir)):
-            other = record.retrieval.variant
-            if record.candidate_id in wanted and other is not None and other != variant:
-                raise ConfigError(
-                    f"{candidates_path(ticker, out_dir)} already has {record.candidate_id} "
-                    f"from retrieval variant {other!r}, not {variant!r}; use --variant "
-                    f"{other} to resume it, or --out-dir to start a separate set"
-                )
+        path = candidates_path(ticker, out_dir)
+        for record in read_candidates(path):
+            if record.candidate_id not in wanted:
+                continue
+            had = record.retrieval
+            checks = [
+                ("retrieval variant", had.variant, variant, f"--variant {had.variant}"),
+                ("prompt version", record.prompt_version, prompt_version, "that version's prompts"),
+                ("top_k", had.top_k, top_k, f"--top-k {had.top_k}"),
+                ("embedder", had.embedder, embedder, "the same --embedder"),
+                ("retriever", had.retriever, retriever, "the same pool, rrf_k and reranker"),
+            ]
+            for what, have, want, how in checks:
+                if have is not None and want is not None and have != want:
+                    raise ConfigError(
+                        f"{path} already has {record.candidate_id} made with {what} "
+                        f"{have!r}, not {want!r}; use {how} to resume it, or --out-dir to "
+                        "start a separate set"
+                    )
 
 
 def main(argv: list[str] | None = None) -> int:

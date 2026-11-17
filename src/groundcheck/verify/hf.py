@@ -20,6 +20,13 @@ the evidence supports (MiniCheck) or is consistent with (HHEM) the claim. Mappin
 - evidence = the best-matching unit (sentence or table row) of the best chunk, for
   supported verdicts only (an unsupported verdict cites nothing, like a gold label).
 
+**Truncation.** Chunks are sized to 480 *bge-small* tokens, but MiniCheck (DeBERTa) and
+the fine-tuned model tokenize differently and add the claim, so some (chunk, claim)
+inputs exceed 512 tokens and `truncation="only_first"` cuts the end of the chunk. Each
+verdict records `pairs` and `truncated_pairs` in `details` (counted after the latency
+clock stops) and `eval-verifiers` reports the totals. HHEM truncates inside its own
+`predict`, which does not expose a count (docs/DESIGN.md, "Needs verification on a Mac").
+
 **Three-way models**: the fine-tuned verifier (`verify/finetuned.py`) reuses
 `import_torch_stack` and `pick_device` from here.
 
@@ -62,6 +69,28 @@ def pick_device(torch: Any, requested: str | None = None) -> str:
 
 def runtime_version(torch: Any, transformers: Any) -> str:
     return f"transformers {transformers.__version__}, torch {torch.__version__}"
+
+
+def count_truncated(tokenizer: Any, texts: list[str], claim: str, max_length: int) -> int | None:
+    """How many (text, claim) pairs are longer than `max_length` tokens, i.e. lose the end
+    of the text under `truncation="only_first"`. None if the tokenizer cannot say."""
+    try:
+        encoded = tokenizer(texts, [claim] * len(texts), truncation=False)
+        lengths = [len(ids) for ids in encoded["input_ids"]]
+    except Exception:  # noqa: BLE001  a count is optional; never fail a check over it
+        return None
+    if len(lengths) != len(texts):
+        return None
+    return sum(n > max_length for n in lengths)
+
+
+def truncation_details(
+    tokenizer: Any, chunks: list[EvidenceChunk], claim: str, max_length: int
+) -> dict[str, Any]:
+    truncated = count_truncated(tokenizer, [c.text for c in chunks], claim, max_length)
+    if truncated is None:
+        return {}
+    return {"pairs": len(chunks), "truncated_pairs": truncated}
 
 
 def support_index(id2label: dict[int, str] | None) -> int:
@@ -155,6 +184,9 @@ class MiniCheckVerifier(ChunkScoringVerifier):
         self.lm.eval()
         self.support_index = support_index(getattr(self.lm.config, "id2label", None))
         self.revision = revision or getattr(self.lm.config, "_commit_hash", None)
+
+    def _untimed_details(self, claim: str, chunks: list[EvidenceChunk]) -> dict[str, Any]:
+        return truncation_details(self.tokenizer, chunks, claim, self.max_length)
 
     def support_probs(self, claim: str, texts: list[str]) -> list[float]:
         torch = self._torch

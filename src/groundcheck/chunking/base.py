@@ -32,6 +32,11 @@ class Chunk(BaseModel):
     text: str
     word_count: int
     chunker: str  # e.g. "fixed-p250-o50-t120": the chunker and its settings
+    # Table chunks only, and only when the chunker was asked to record it: the table's
+    # title or caption, i.e. the nearest preceding heading or line of the filing. It is
+    # metadata for retrieval (BM25 `table_context`); it is NOT part of `text`, so gold
+    # strings and evidence spans are unaffected. Empty: none recorded.
+    caption: str = ""
 
 
 def chunk_id(ticker: str, item: str, kind: str, index: int, part: str = "") -> str:
@@ -60,7 +65,13 @@ class Chunker(Protocol):
 def write_chunks(chunks: list[Chunk], path: Path) -> None:
     """Write one chunk per line, keys in a fixed order, so diffs stay readable."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    lines = [json.dumps(c.model_dump(), ensure_ascii=False) for c in chunks]
+    # An empty caption is left out, so files written without `--table-captions` are
+    # byte-identical to those written before the field existed (same sha, same indexes).
+    rows = [c.model_dump() for c in chunks]
+    lines = [
+        json.dumps({k: v for k, v in row.items() if k != "caption" or v}, ensure_ascii=False)
+        for row in rows
+    ]
     tmp = path.with_name(path.name + ".part")
     tmp.write_text("".join(line + "\n" for line in lines), encoding="utf-8")
     tmp.replace(path)

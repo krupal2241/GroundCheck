@@ -15,6 +15,9 @@ Rules (see docs/labeling_guide.md):
 - `invalid` marks a claim that should never have been proposed (a fragment, a
   duplicate, a claim with no checkable content): it has no label, no evidence and no
   edge case, and it is never exported. `label-stats` counts these separately.
+- `assistance` says what was suggested when the label was made; `suggestion_history`
+  keeps every other label suggestion ever shown for the claim (append-only). Both go
+  into the gold export, so `eval-verifiers` can break results down by them.
 
 The schema checks what it can on its own. Pass the candidate's chunks as validation
 context (`LabelRecord.model_validate(data, context={"chunks": {chunk_id: text}})`)
@@ -96,6 +99,10 @@ class Assistance(BaseModel):
     suggestion_verifier: str | None = None
     suggestion_score: float | None = None  # the verifier's P(supported)
     agreed: bool | None = None  # final label == suggested label (None: none shown)
+    # True when the annotator saw this suggestion and pressed Enter to keep the label
+    # that was already there (the record's `assistance` still describes how that label
+    # was first made; this entry lives in `suggestion_history`).
+    kept_existing: bool = False
 
 
 class LabelRecord(BaseModel):
@@ -118,6 +125,21 @@ class LabelRecord(BaseModel):
     # Which suggestions were shown (labeling/assist.py). None: labeled before
     # assistance existed, i.e. nothing was suggested.
     assistance: Assistance | None = None
+    # Every label suggestion ever shown for this claim that `assistance` does not
+    # describe: suggestions seen in earlier labeling passes, and suggestions seen when
+    # Enter kept the label. Append-only, so "a suggestion was shown" is never lost when
+    # a claim is labeled again without --suggest.
+    suggestion_history: list[Assistance] = Field(default_factory=list)
+
+    @property
+    def suggestions_seen(self) -> list[Assistance]:
+        """Every label suggestion the annotator saw for this claim, oldest first."""
+        current = [self.assistance] if self.assistance else []
+        return [a for a in [*self.suggestion_history, *current] if a.label_suggestion_shown]
+
+    @property
+    def suggestion_verifiers(self) -> list[str]:
+        return sorted({a.suggestion_verifier or "(unknown)" for a in self.suggestions_seen})
 
     @field_validator("note")
     @classmethod

@@ -26,10 +26,10 @@ OTHER_TEXT = (
 
 @pytest.fixture
 def two_companies(tiny_corpus):
-    """The tiny corpus plus an indexed second company, OTHR."""
+    """The tiny corpus plus an indexed second labeled company, PEER."""
     chunk = Chunk(
-        chunk_id="OTHR-7-p0000",
-        ticker="OTHR",
+        chunk_id="PEER-7-p0000",
+        ticker="PEER",
         accession="0000000002-25-000001",
         item="7",
         section_title="T",
@@ -39,17 +39,20 @@ def two_companies(tiny_corpus):
         word_count=len(OTHER_TEXT.split()),
         chunker="fixed-p250-o50-t120",
     )
-    write_chunks([chunk], tiny_corpus["chunks"] / "OTHR.jsonl")
+    write_chunks([chunk], tiny_corpus["chunks"] / "PEER.jsonl")
+    # OTHR (role: unlabeled, like JPM) is indexed too, with the same text: wrong-context
+    # mode must never take its passages (see test_wrong_context_never_uses_unlabeled).
+    unlabeled = chunk.model_copy(update={"chunk_id": "OTHR-7-p0000", "ticker": "OTHR"})
+    write_chunks([unlabeled], tiny_corpus["chunks"] / "OTHR.jsonl")
+    with tiny_corpus["config"].open("a") as f:
+        f.write("  - {ticker: PEER, name: Peer Corp, cik: 3, role: labeled}\n")
     config = load_retrieval_config(tiny_corpus["retrieval_config"])
     for variant in ("dense", "hybrid-rerank"):  # plain and header-embedded indexes
-        build_variant_index(
-            variant, config.variants[variant], "OTHR", HashingEmbedder(),
-            tiny_corpus["chunks"], tiny_corpus["index"],
-        )  # fmt: skip
-        build_variant_index(
-            variant, config.variants[variant], "EXCO", HashingEmbedder(),
-            tiny_corpus["chunks"], tiny_corpus["index"],
-        )  # fmt: skip
+        for ticker in ("PEER", "OTHR", "EXCO"):
+            build_variant_index(
+                variant, config.variants[variant], ticker, HashingEmbedder(),
+                tiny_corpus["chunks"], tiny_corpus["index"],
+            )  # fmt: skip
     return tiny_corpus
 
 
@@ -105,8 +108,8 @@ def test_all_modes_work_with_a_hybrid_or_lexical_retriever(two_companies, varian
     for r in found:
         assert r.retrieved == rag[r.question_id].retrieved  # same evidence in every mode
         if r.mode == "wrong-context":
-            assert r.context_source == "other-company:OTHR"
-            assert {c.chunk_id for c in r.context} == {"OTHR-7-p0000"}
+            assert r.context_source == "other-company:PEER"
+            assert {c.chunk_id for c in r.context} == {"PEER-7-p0000"}
     if variant == "hybrid-rerank":
         assert "bm25" in found[0].retrieval.retriever and "rerank=" in found[0].retrieval.retriever
 
@@ -116,19 +119,19 @@ def make_index_retriever(corpus, tickers, variant="dense"):
 
 
 def test_wrong_context_picker_sources(two_companies):
-    retrieve = make_index_retriever(two_companies, ["EXCO", "OTHR"])
+    retrieve = make_index_retriever(two_companies, ["EXCO", "PEER"])
     question = "What were total net sales in fiscal 2025?"
     correct = retrieve("EXCO", question, 2)
-    company = WrongContextPicker(retrieve, ["EXCO", "OTHR"], "other-company")
+    company = WrongContextPicker(retrieve, ["EXCO", "PEER"], "other-company")
     hits, source = company.pick("EXCO", question, "EXCO-G01", correct, 2)
-    assert source == "other-company:OTHR" and [h.chunk.ticker for h in hits] == ["OTHR"]
-    item = WrongContextPicker(retrieve, ["EXCO", "OTHR"], "other-item")
+    assert source == "other-company:PEER" and [h.chunk.ticker for h in hits] == ["PEER"]
+    item = WrongContextPicker(retrieve, ["EXCO", "PEER"], "other-item")
     hits, source = item.pick("EXCO", question, "EXCO-G01", correct, 2)
     correct_items = {h.chunk.item for h in correct}
     assert hits and not {h.chunk.item for h in hits} & correct_items
     assert source.startswith("other-item:EXCO Item ") and [h.rank for h in hits] == [1, 2]
     # Mixed is deterministic per question ID; with no other company it falls back.
-    mixed = WrongContextPicker(retrieve, ["EXCO", "OTHR"])
+    mixed = WrongContextPicker(retrieve, ["EXCO", "PEER"])
     assert mixed.kind_for("EXCO-G01") == mixed.kind_for("EXCO-G01")
     alone = WrongContextPicker(retrieve, ["EXCO"], "other-company")
     assert alone.pick("EXCO", question, "EXCO-G01", correct, 2)[1].startswith("other-item:")
@@ -154,13 +157,13 @@ def test_prompts_per_mode(two_companies, monkeypatch):
     seen.clear()
     generate(two_companies, "--mode", "wrong-context", "--wrong-context-source",
              "other-company", "--limit", "1")  # fmt: skip
-    assert seen[0].system == ANSWER_SYSTEM and "(OTHR-7-p0000)" in seen[0].prompt
+    assert seen[0].system == ANSWER_SYSTEM and "(PEER-7-p0000)" in seen[0].prompt
     assert "EXCO-" not in seen[0].prompt.split("Question:")[0].replace("Company: EXCO", "")
 
 
 def test_training_excludes_wrong_context_passages(two_companies):
     generate(two_companies, "--mode", "wrong-context", "--wrong-context-source", "other-company")
-    assert "OTHR-7-p0000" in candidate_chunk_ids(two_companies["out"])
+    assert "PEER-7-p0000" in candidate_chunk_ids(two_companies["out"])
 
 
 # --- label-plan and label --plan ---------------------------------------------------------

@@ -54,7 +54,8 @@ STAGES: tuple[str, ...] = (
 STAGE_VERSION = 1  # bump to invalidate every stored fingerprint
 DRY_RUN_DIR = REPO_ROOT / "data" / "cache" / "dry-run" / "pipeline"
 DEFAULT_STATE_DIR = REPO_ROOT / "data" / "cache" / "pipeline"
-DEFAULT_VERIFIERS = ("prompted", "hhem", "minicheck")
+# `numeric` first: the rule-based baseline costs nothing and never loads a model.
+DEFAULT_VERIFIERS = ("numeric", "prompted", "hhem", "minicheck")
 NOTHING_TO_DO = 3  # a stage's "ran, but had no input" code (never stored as done)
 
 

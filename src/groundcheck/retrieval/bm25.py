@@ -1,10 +1,18 @@
 """Okapi BM25 over one company's chunks, in pure Python + numpy (no extra dependency).
 
-Tokens are the same as the hashing embedder's: lowercase words and numbers, with
-thousands separators and decimals kept inside one token, so a question's "64,377" or
-"2025" matches a table row's `$64,377` or a heading's `2025`. A short stopword list
-drops question words ("what", "how", "did") that would otherwise favor chunks that
-happen to repeat them.
+Tokens are lowercase words and numbers (`tokenize`):
+
+- a number is one token in the canonical form of `finnum.number_token`: thousands
+  separators and trailing decimal zeros removed, so "12,345", "$12,345" and "12345" are
+  the same token, "391.0" is "391", and "89.3" stays "89.3";
+- a comma only joins digits when exactly three digits follow it, so "2025,2024" is two
+  years, not one number;
+- letters and digits are split, so "FY2025" gives "fy" and "2025" (and matches a
+  heading's "2025"), "Q4" gives "q" and "4", "10-K" gives "10" and "k".
+
+A short stopword list drops question words ("what", "how", "did") that would otherwise
+favor chunks that happen to repeat them. (The hashing test embedder keeps its own,
+older token pattern, `embedder.TOKEN_RE`; BM25 no longer shares it.)
 
 Scoring is the standard Okapi BM25 with Lucene's non-negative IDF,
 `log(1 + (N - df + 0.5) / (df + 0.5))`, `k1 = 1.5`, `b = 0.75`. A filing has a few
@@ -13,11 +21,15 @@ no inverted-index tricks are needed.
 """
 
 import math
+import re
 from collections import Counter
 
 import numpy as np
 
-from groundcheck.retrieval.embedder import TOKEN_RE
+from groundcheck.finnum import number_token
+
+# A number with proper thousands separators, a plain number, or a run of letters.
+TOKEN_RE = re.compile(r"\d{1,3}(?:,\d{3})+(?!\d)(?:\.\d+)?|\d+(?:\.\d+)?|[a-z]+")
 
 _STOPWORDS = """a an and are as at be been by can could did do does for from had has have how
 in is it its of on or our than that the their there these this those to was were what when
@@ -26,7 +38,13 @@ STOPWORDS = frozenset(_STOPWORDS.split())
 
 
 def tokenize(text: str) -> list[str]:
-    return [t for t in TOKEN_RE.findall(text.lower()) if t not in STOPWORDS]
+    tokens = []
+    for token in TOKEN_RE.findall(text.lower()):
+        if token[0].isdigit():
+            token = number_token(token)  # "12,345" -> "12345", "391.0" -> "391"
+        if token not in STOPWORDS:
+            tokens.append(token)
+    return tokens
 
 
 class BM25:

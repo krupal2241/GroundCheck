@@ -11,6 +11,7 @@ import argparse
 import dataclasses
 import logging
 import sys
+import time
 from pathlib import Path
 
 from groundcheck import __version__
@@ -34,7 +35,13 @@ from groundcheck.edgar.client import SecClient, SecRequestError
 from groundcheck.edgar.download import DEFAULT_RAW_DIR, download_all, resolve_latest_10k
 from groundcheck.generation.pipeline import DEFAULT_CANDIDATES_DIR
 from groundcheck.labeling.plan import DEFAULT_PLAN_PATH, balance_table, load_plan, make_plan
-from groundcheck.labeling.report import check_labels, export_labels, label_stats
+from groundcheck.labeling.report import (
+    DEFAULT_TARGET,
+    check_labels,
+    export_labels,
+    label_stats,
+    progress_to_target,
+)
 from groundcheck.labeling.session import Labeler
 from groundcheck.labeling.store import (
     DEFAULT_EXPORT_PATH,
@@ -150,7 +157,8 @@ def cmd_chunk(args: argparse.Namespace) -> int:
     companies = [config.get(t) for t in args.only] if args.only else config.companies
     try:
         settings = (args.prose_words, args.overlap, args.table_words, args.max_tokens)
-        chunker = FixedSizeChunker(*settings)
+        in_text = args.table_captions_in_text
+        chunker = FixedSizeChunker(*settings, args.table_captions or in_text, in_text)
     except ValueError as exc:
         raise ConfigError(str(exc)) from exc
     count_tokens = load_bge_token_counter() if args.tokenizer == "bge-small" else None
@@ -207,7 +215,13 @@ def _open_retriever(args, config, name, spec, tickers, embedder=None, reranker=N
     )
 
 
+def _check_cooldown(args: argparse.Namespace) -> None:
+    if args.cooldown_seconds < 0:
+        raise ConfigError("--cooldown-seconds must not be negative")
+
+
 def cmd_index(args: argparse.Namespace) -> int:
+    _check_cooldown(args)
     config = load_companies(args.config)
     companies = [config.get(t) for t in args.only] if args.only else config.companies
     years = fiscal_years(config)
@@ -229,7 +243,10 @@ def cmd_index(args: argparse.Namespace) -> int:
         embedder = embedders[spec.embedder]
         headers = " + contextual headers" if spec.headers else ""
         print(f"Variant {name}: embedder {embedder.name} (dim {embedder.dim}){headers}")
-        for company in companies:
+        for position, company in enumerate(companies):
+            if position and args.cooldown_seconds > 0:
+                print(f"  cooling down {args.cooldown_seconds:g}s before {company.ticker}")
+                time.sleep(args.cooldown_seconds)
             if hasattr(embedder, "token_counts"):
                 chunks = read_chunks(chunks_path(company.ticker, args.chunks_dir))
                 texts = [model_text(c, spec.headers, years.get(company.ticker)) for c in chunks]
@@ -444,11 +461,31 @@ def cmd_label_plan(args: argparse.Namespace) -> int:
 
 
 def cmd_label_stats(args: argparse.Namespace) -> int:
+    if args.target < 1:
+        raise ConfigError("--target must be at least 1")
     store = LabelStore(args.labels)
     candidates = load_candidates(args.candidates_dir, args.company)
     records = [r for r in store.records.values() if not args.company or r.ticker in args.company]
-    print(label_stats(records, candidates))
+    if not args.summary_only:
+        print(label_stats(records, candidates))
+        print()
+    companies = args.company
+    if not companies:
+        try:  # an even share per LABELED company, even before all of them have candidates
+            config = load_companies(DEFAULT_COMPANIES_PATH)
+            companies = [c.ticker for c in config.companies if c.role == "labeled"]
+        except ConfigError:
+            companies = None
+    print(progress_to_target(records, candidates, args.target, companies))
     return 0
+
+
+def cmd_doctor(args: argparse.Namespace) -> int:
+    from groundcheck.doctor import format_checks, run_checks
+
+    checks = run_checks(load_llm_config(args.llm_config), env_file=args.env_file)
+    print(format_checks(checks))
+    return 1 if any(c.status == "fail" for c in checks) else 0
 
 
 def cmd_label_check(args: argparse.Namespace) -> int:
@@ -498,13 +535,21 @@ def verifier_options(args: argparse.Namespace) -> VerifierOptions:
 
 
 def cmd_eval_verifiers(args: argparse.Namespace) -> int:
+    _check_cooldown(args)
     gold = load_gold(args.gold)
+    gold_total = len(gold)
     if args.company:
         gold = [g for g in gold if g.ticker in args.company]
     if args.limit is not None:
         gold = gold[: args.limit]
     if not gold:
         raise ConfigError("no gold labels left after --company/--limit")
+    if len(gold) != gold_total:
+        print(
+            f"NOTE: evaluating a subset ({len(gold)} of {gold_total} gold claims). Rows "
+            "computed on different claims are flagged in verifier_eval.md; re-run every "
+            "verifier on the same claims before comparing them."
+        )
     if args.hf_model and len(args.verifier) > 1:
         raise ConfigError("--hf-model applies to one verifier; run them one at a time")
     options = verifier_options(args)
@@ -517,6 +562,8 @@ def cmd_eval_verifiers(args: argparse.Namespace) -> int:
         args.gold,
         args.results_dir,
         prices,
+        gold_total=gold_total,
+        cooldown_seconds=args.cooldown_seconds,
     )
     print(f"Wrote {args.results_dir / 'verifier_eval.json'} and verifier_eval.md")
     print(f"Per-claim predictions: {args.results_dir / 'predictions'}/")
@@ -606,6 +653,14 @@ def cmd_build_training_data(args: argparse.Namespace) -> int:
     for problem in manifest["companies_in_config_without_chunks"]:
         print(f"WARNING: {problem} is in {args.training_config or 'config/training.yaml'} "
               "but has no chunks")  # fmt: skip
+    for path in manifest["gold_files_missing"]:
+        print(
+            f"WARNING: {path} does not exist, so nothing from it was excluded. If you have "
+            "labeled or exported anything, pass the right --gold / --labels path before "
+            "training; otherwise this is expected."
+        )
+    for item in manifest["dev_items_without_chunks"]:
+        print(f"WARNING: dev_items lists {item}, but that company has no chunk from it")
     if not (manifest["gold_claims_excluded"] or manifest["candidate_chunks_excluded"]):
         print(
             "WARNING: found no gold labels, label file or candidates to exclude. That is "
@@ -615,8 +670,13 @@ def cmd_build_training_data(args: argparse.Namespace) -> int:
     print(
         f"Excluded {manifest['gold_claims_excluded']} gold claim(s), "
         f"{manifest['gold_chunks_excluded']} gold chunk(s) and "
-        f"{manifest['candidate_chunks_excluded']} other candidate chunk(s)."
+        f"{manifest['candidate_chunks_excluded']} other candidate chunk(s), plus "
+        f"{manifest['chunks_excluded_sharing_gold_span']} chunk(s) that contain a gold "
+        "evidence span."
     )
+    for split, by_ticker in manifest["items_by_split"].items():
+        detail = "; ".join(f"{t}: Items {', '.join(items)}" for t, items in by_ticker.items())
+        print(f"  {split:<5} uses {detail or 'nothing'}")
     for split, counts in manifest["counts_by_split_and_label"].items():
         total = sum(counts.values())
         detail = ", ".join(f"{k} {v}" for k, v in sorted(counts.items()))
@@ -626,8 +686,10 @@ def cmd_build_training_data(args: argparse.Namespace) -> int:
     if n_train < MIN_TRAINING_EXAMPLES:
         print(
             f"WARNING: only {n_train} training example(s) (fewer than "
-            f"{MIN_TRAINING_EXAMPLES}). A verifier fine-tuned on this few will be weak; "
-            "add companies to the train split or raise max_seeds_per_company."
+            f"{MIN_TRAINING_EXAMPLES}). A verifier fine-tuned on this few will be weak. "
+            "Check that the train companies (JPM and BRK-B by default) have chunks "
+            "(`groundcheck chunk`), hold out fewer dev_items, or raise "
+            "max_seeds_per_company in the training config."
         )
     print(f"Wrote {args.out_dir}/{{train,dev,test}}.jsonl and manifest.json")
     return 0
@@ -750,6 +812,17 @@ def add_verifier_options(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def add_cooldown_option(parser: argparse.ArgumentParser, where: str) -> None:
+    parser.add_argument(
+        "--cooldown-seconds",
+        type=float,
+        default=0.0,
+        metavar="SECONDS",
+        help=f"sleep this long {where}, so a fanless laptop can cool down (default 0: "
+        "no pause; try 30 to 60). Pauses are not counted in latency or throughput",
+    )
+
+
 def add_llm_options(parser: argparse.ArgumentParser) -> None:
     """--llm-config, --provider, --model and --allow-paid, shared with the scripts."""
     parser.add_argument("--llm-config", type=Path, default=None, help="default: config/llm.yaml")
@@ -820,6 +893,19 @@ def build_parser() -> argparse.ArgumentParser:
     chunk.add_argument("--overlap", type=int, default=50)
     chunk.add_argument("--table-words", type=int, default=120)
     chunk.add_argument(
+        "--table-captions",
+        action="store_true",
+        help="record each table's caption (the line above it) in the chunk's `caption` "
+        "field, for BM25 `table_context`; chunk text is unchanged, but the chunks file "
+        "changes, so dense indexes must be rebuilt",
+    )
+    chunk.add_argument(
+        "--table-captions-in-text",
+        action="store_true",
+        help="also write the caption as the first line of the table chunk's TEXT. This "
+        "changes stored text: existing evidence-span offsets and indexes become stale",
+    )
+    chunk.add_argument(
         "--max-tokens",
         type=int,
         default=DEFAULT_MAX_TOKENS,
@@ -847,6 +933,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="build one FAISS index per company for a retrieval variant (or --variant all)",
     )
     index.add_argument("--only", nargs="+", metavar="TICKER", help="limit to tickers")
+    add_cooldown_option(index, "between companies")
     index.set_defaults(func=cmd_index)
 
     retrieve = subparsers.add_parser(
@@ -949,7 +1036,27 @@ def build_parser() -> argparse.ArgumentParser:
         help="label counts by label, mode, company, question type and edge case",
     )
     stats.add_argument("--company", nargs="+", metavar="TICKER", help="limit to tickers")
+    stats.add_argument(
+        "--target",
+        type=int,
+        default=DEFAULT_TARGET,
+        help=f"size of the balanced labeled set to aim for (default {DEFAULT_TARGET} claims)",
+    )
+    stats.add_argument(
+        "--summary-only",
+        action="store_true",
+        help="print only the one-screen progress-to-target summary",
+    )
     stats.set_defaults(func=cmd_label_stats)
+
+    doctor = subparsers.add_parser(
+        "doctor",
+        help="check that this machine is ready: Python, extras, Ollama, disk, .env, data "
+        "folders, and that no paid API key is set",
+    )
+    doctor.add_argument("--llm-config", type=Path, default=None, help="default config/llm.yaml")
+    doctor.add_argument("--env-file", type=Path, default=None, help="default: ./.env")
+    doctor.set_defaults(func=cmd_doctor)
 
     check = subparsers.add_parser(
         "label-check", parents=[label_options], help="validate every label record"
@@ -986,6 +1093,7 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"hosted prices for the cost ESTIMATE (default {DEFAULT_PRICES_PATH.name})",
     )
     add_verifier_options(eval_verifiers)
+    add_cooldown_option(eval_verifiers, "between verifiers and after every 25 claims")
     eval_verifiers.set_defaults(func=cmd_eval_verifiers)
 
     errors = subparsers.add_parser(

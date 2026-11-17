@@ -38,7 +38,7 @@ verifier in this repository.
    |---|---|---|
    | `rag` | the 5 retrieved passages | the normal case; mostly supported claims |
    | `no-context` | nothing (closed-book) | what a small model asserts from memory |
-   | `wrong-context` | 5 passages for the same question from another company, or from other Items of the same filing | answers built from the wrong evidence |
+   | `wrong-context` | 5 passages for the same question from another labeled company (never JPM or BRK-B, which train the fine-tuned verifier), or from other Items of the same filing | answers built from the wrong evidence |
 
    Temperature 0, seed 42; the model digest, runtime version and prompt version are
    stored with every answer.
@@ -93,8 +93,11 @@ Filled in by `groundcheck report` from the confirmed labels (rows: generation mo
   the whole set is not "accuracy in deployment". Per-mode results are reported.
 - **"Unsupported" is relative to the top 5 passages,** not to the whole filing.
 - **Assisted labels** (if `--suggest` was ever used) may lean towards the suggesting
-  verifier; `label-stats` reports agreement and the label mix with and without
-  suggestions.
+  verifier. Every suggestion ever shown for a claim is kept (also when the label was
+  kept with Enter or made again without `--suggest`) and exported with the label
+  (`assistance`, `suggestion_history`, `suggestion_verifiers`, `evidence_source`);
+  `label-stats` reports agreement, and `eval-verifiers` scores assisted labels
+  separately, by suggesting verifier.
 - **Eight large US companies, one fiscal year each,** in English.
 
 ## Intended use

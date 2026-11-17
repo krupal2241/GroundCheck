@@ -232,9 +232,16 @@ the comparison between verifiers would no longer be fair. So:
 - Never use the verifier you're going to evaluate as the suggester for the labels you
   evaluate it on.
 - Every label records whether a suggestion was shown, which label and verifier, its
-  score, and whether you agreed. `label-stats` prints the agreement rate and the label
-  distribution with vs without suggestions. A much higher share of the suggested label
-  among assisted labels is the warning sign.
+  score, and whether you agreed. That record is never lost: if you label the claim
+  again without `--suggest`, or press Enter to keep a label while a suggestion is on
+  screen, the suggestion you saw stays in the label's `suggestion_history`. `label-stats`
+  prints the agreement rate and the label distribution with vs without suggestions. A
+  much higher share of the suggested label among assisted labels is the warning sign.
+- The export carries all of it, and `eval-verifiers` scores labels made with a
+  suggestion on screen separately, per suggesting verifier. Accepting the *evidence*
+  suggestion is recorded too (`evidence_source`): the verifiers' own span picker uses
+  the same rule, so evidence agreement is reported separately for spans you pasted by
+  hand.
 - Only local verifiers are offered; `--suggest` never allows a paid provider.
 
 ## Workflow
@@ -244,7 +251,8 @@ groundcheck label --only-unlabeled          # label; x = invalid claim; q quits,
 groundcheck label --company AAPL            # one company; Enter keeps existing labels
 groundcheck label-plan --claims 300         # a sample balanced across company, qtype, mode
 groundcheck label --plan data/labels/label_plan.json --only-unlabeled
-groundcheck label-stats                     # counts by label, company, qtype, edge case
+groundcheck label-stats                     # counts by label, company, qtype, edge case,
+                                            # then progress to a balanced set of 300
 groundcheck label-check                     # validate every record (exit 1 on problems)
 groundcheck export-labels                   # confirmed labels -> data/eval/gold_labels.jsonl
 ```

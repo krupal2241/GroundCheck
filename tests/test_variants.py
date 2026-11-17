@@ -147,7 +147,7 @@ def test_tokenize_keeps_numbers_whole_and_drops_stopwords():
         "greater",
         "region",
         "sales",
-        "64,377",
+        "64377",
         "2025",
     ]
 

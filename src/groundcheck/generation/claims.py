@@ -12,7 +12,23 @@ than a missing claim. So every proposed claim is checked by plain rules:
 - not a duplicate or near-duplicate of an earlier claim (same numbers and >= 80% of
   the same content words);
 - no "passage [n]" or bare "[n]" citation;
-- every number in it also occurs in the answer (no added facts).
+- every number in it also occurs in the answer (no added facts). Numbers are compared
+  by value (`groundcheck.finnum`), so "$89.3 billion" in the claim matches "$89,300
+  million" or "$89.30 billion" in the answer; a number that merely looks the same as
+  written also passes, as before;
+- it is about the company, not about the passages or the model: "The passages do not
+  contain ...", "Apple does not have information about its cash spent ..." and "I
+  cannot determine ..." are abstentions, not claims (`META_RE`).
+
+Two claims are never near-duplicates when the words they differ in include a direction
+word (increased / decreased, higher / lower, ...) or a negation (not, no, never, n't):
+"net sales increased 4%" and "net sales decreased 4%" are opposite claims, and the
+second one is exactly the kind of error the labeled set is for.
+
+An answer is an **abstention** when every sentence of it is such a meta statement
+(`is_abstention`): the exact sentence the answer prompt asks for, or a small model's
+rewording of it. An abstention has no claims: none is kept, and an empty split is
+accepted without re-asking the model to find facts that are not there.
 
 If any claim breaks a rule, the model is asked again (at most `MAX_RETRIES` times) with
 a stricter message listing each rejected claim and why. The attempt with the most valid
@@ -28,11 +44,12 @@ from dataclasses import replace
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from groundcheck.finnum import find_match, number_token, parse_quantities
 from groundcheck.generation.prompts import ABSTAIN_TEXT, ClaimSplit
 from groundcheck.llm.base import LLMProvider, LLMRequest, LLMResponse
 from groundcheck.llm.structured import StructuredOutputError, generate_structured
 
-VALIDATOR_VERSION = "claims-validator-v1"
+VALIDATOR_VERSION = "claims-validator-v2"  # v2: meta claims, abstention regex, opposites
 MIN_WORDS = 5
 MAX_RETRIES = 3
 NEAR_DUPLICATE_JACCARD = 0.8
@@ -66,9 +83,85 @@ STOPWORDS = frozenset(
     """.split()  # noqa: SIM905
 )
 
-NUMBER_RE = re.compile(r"\d[\d,]*(?:\.\d+)?")
 CITATION_RE = re.compile(r"\bpassages?\s*\[?\s*\d+\s*\]?|\[\s*\d+\s*\]", re.IGNORECASE)
 WORD_RE = re.compile(r"[A-Za-z0-9$%][A-Za-z0-9$%,.'&-]*")
+
+
+# Sources a model talks about when it abstains, and what they "do not" do.
+_SOURCES = (
+    r"(?:passages?|documents?|excerpts?|context|sources?|texts?|snippets?|"
+    r"(?:provided|given|available|above) (?:information|data|text|material)|"
+    r"information (?:provided|given|available|above))"
+)
+_LACK = (
+    r"(?:contain|include|provide|mention|state|specify|say|give|address|cover|"
+    r"disclose|report|show|indicate|have|offer)"
+)
+_INFO = r"(?:information|data|details?|knowledge)"
+# A statement about the passages or the model instead of about the company.
+META_RE = re.compile(
+    "|".join(
+        [
+            # "The passages do not contain ...", "the provided context doesn't mention ..."
+            rf"\b{_SOURCES}\b[^.;]{{0,40}}?\b(?:do|does|did)(?: not|n[’']t)\s+"
+            rf"(?:\w+ly\s+)?{_LACK}\b",
+            # "Apple does not have information about ...", "I don't have access to ..."
+            rf"\b(?:do|does|did)(?: not|n[’']t) have\b[^.;]{{0,30}}?\b{_INFO}\b",
+            rf"\b(?:has|have|had) no\b[^.;]{{0,30}}?\b{_INFO}\b",
+            # "No information is available ...", "there is no information ..."
+            rf"\b(?:no|not enough|insufficient)\b[^.;]{{0,20}}?\b{_INFO}\b[^.;]{{0,20}}?"
+            r"\b(?:is|are|was|were)\s+(?:available|provided|given|included|mentioned|found)\b",
+            rf"\bthere (?:is|are|was|were) (?:no|not enough|insufficient)\b[^.;]{{0,20}}?"
+            rf"\b{_INFO}\b",
+            # "... is not available / not mentioned in the passages", "is not provided"
+            r"\b(?:is|are|was|were) not (?:provided|given|specified|mentioned|stated)\b",
+            rf"\b{_INFO}\b[^.;]{{0,60}}?\b(?:is|are|was|were) not (?:available|included|"
+            r"disclosed|found|known)\b",
+            rf"\bnot (?:\w+ )?(?:in|from|within) the {_SOURCES}\b",
+            # The model about itself.
+            r"\bI (?:do not|don[’']t|cannot|can[’']t|could not|couldn[’']t|am not|am unable|"
+            r"[’']m not|[’']m unable|was unable|apologi[sz]e)\b",
+            r"\bas an AI\b|\b(?:language|AI) model\b",
+            r"\b(?:cannot|can[’']t|could not|couldn[’']t) be "
+            r"(?:determined|answered|found|verified)\b",
+            r"\b(?:unable|not able|impossible) to (?:find|provide|determine|answer|verify|locate|"
+            r"confirm|access)\b",
+        ]
+    ),
+    re.IGNORECASE,
+)
+ABSTENTION_SENTENCE_RE = re.compile(r"(?<=[.!?])\s+")
+
+# Words that turn a claim into its opposite. Two claims that differ in one of these are
+# different claims, however similar the rest is.
+DIRECTION_WORDS = frozenset(
+    """
+    increased decreased increase decrease increases decreases increasing decreasing
+    rose fell rise fall rises falls risen fallen grew grow grows grown shrank shrink
+    declined decline declines dropped drop drops gained gain gains lost lose loses loss
+    losses higher lower up down above below more less fewer greater smaller larger
+    over under exceeded exceed exceeds improved worsened improvement deterioration
+    growth reduction reduced raised lowered expanded contracted positive negative
+    profit favorable unfavorable before after first last maximum minimum most least
+    """.split()  # noqa: SIM905
+)
+NEGATION_WORDS = frozenset(
+    "not no never none nor neither without cannot unable non".split()  # noqa: SIM905
+)
+
+
+SCALE_WORDS = frozenset(
+    "thousand thousands million millions billion billions trillion trillions".split()  # noqa: SIM905
+)
+
+
+def is_opposing_word(word: str) -> bool:
+    return (
+        word in DIRECTION_WORDS
+        or word in NEGATION_WORDS
+        or word.endswith(("n't", "n’t"))
+        or word.startswith("non-")
+    )
 
 
 class RejectedClaim(BaseModel):
@@ -108,14 +201,26 @@ class ClaimFilterStats(BaseModel):
 
 def normalize_number(text: str) -> str:
     """'12,345' -> '12345', '89.30' -> '89.3', '5.0' -> '5'."""
-    value = text.replace(",", "").rstrip(".")
-    if "." in value:
-        value = value.rstrip("0").rstrip(".")
-    return value
+    return number_token(text.rstrip("."))
 
 
 def numbers_in(text: str) -> set[str]:
-    return {normalize_number(m.group(0)) for m in NUMBER_RE.finditer(text)}
+    """The text's numbers as written (no sign, separators or trailing zeros)."""
+    return {q.token for q in parse_quantities(text)}
+
+
+def number_values(text: str) -> set[str]:
+    """The text's numbers by value: "$89.3 billion" and "89,300 million" are the same."""
+    return {q.value_token for q in parse_quantities(text)}
+
+
+def numbers_not_in_answer(claim: str, answer: str) -> list[str]:
+    """The claim's numbers that the answer does not contain: neither the same value
+    ("$89.3 billion" vs "$89,300 million") nor the same number as written."""
+    in_answer = parse_quantities(answer)
+    return sorted(
+        {q.token for q in parse_quantities(claim) if find_match(q, in_answer, raw_ok=True) is None}
+    )
 
 
 def words_of(text: str) -> list[str]:
@@ -135,11 +240,18 @@ def content_words(text: str) -> set[str]:
 
 
 def near_duplicate(a: str, b: str) -> bool:
-    if numbers_in(a) != numbers_in(b):
+    if number_values(a) != number_values(b):
         return False
-    wa, wb = content_words(a), content_words(b)
+    # The numbers are already known to be equal by value, so how they are written
+    # ("$89.3 billion" vs "$89,300 million") must not count as a difference in words.
+    wa, wb = (
+        {w for w in content_words(text) if not any(ch.isdigit() for ch in w)} - SCALE_WORDS
+        for text in (a, b)
+    )
     if not wa or not wb:
         return wa == wb
+    if any(is_opposing_word(w) for w in wa ^ wb):
+        return False  # "increased 4%" vs "decreased 4%", "did pay" vs "did not pay"
     return len(wa & wb) / len(wa | wb) >= NEAR_DUPLICATE_JACCARD
 
 
@@ -153,7 +265,11 @@ def claim_problems(claim: str, answer: str, earlier: list[str]) -> list[str]:
         reasons.append("no verb: it is not a complete sentence")
     if CITATION_RE.search(claim):
         reasons.append('contains a passage citation such as "passage [1]"; leave citations out')
-    missing = sorted(numbers_in(claim) - numbers_in(answer))
+    if is_meta(claim):
+        reasons.append(
+            "about the passages or the model, not the company (an abstention is not a claim)"
+        )
+    missing = numbers_not_in_answer(claim, answer)
     if missing:
         reasons.append(f"contains number(s) not in the answer: {', '.join(missing)}")
     normalized = " ".join(words_of(claim))
@@ -183,8 +299,22 @@ def validate_claims(claims: list[str], answer: str) -> tuple[list[str], list[Rej
     return kept, rejected
 
 
+def is_meta(text: str) -> bool:
+    """True for a statement about the passages or the model rather than the company."""
+    return META_RE.search(text) is not None
+
+
 def is_abstention(answer: str) -> bool:
-    return " ".join(answer.split()).strip() == ABSTAIN_TEXT
+    """The answer only says the information is missing: the exact abstention sentence,
+    or every sentence of it is a meta statement (a reworded abstention). An answer that
+    abstains and then states a fact anyway is NOT an abstention."""
+    text = " ".join(answer.split()).strip()
+    if not text:
+        return False
+    if text == ABSTAIN_TEXT:
+        return True
+    sentences = [s for s in ABSTENTION_SENTENCE_RE.split(text) if s.strip()]
+    return all(is_meta(s) for s in sentences)
 
 
 def stricter_prompt(base_prompt: str, rejected: list[Rejection], empty: bool) -> str:
@@ -229,6 +359,12 @@ def split_claims(
                 raise
             break
         kept, rejected = validate_claims(split.claims, answer)
+        if abstained:
+            # Nothing in an abstention is a claim; whatever the model proposed is dropped
+            # and it is not asked again to find facts that are not there.
+            rejected += [(c, ["the answer is an abstention: it makes no claim"]) for c in kept]
+            attempts.append(([], rejected, response))
+            break
         attempts.append((kept, rejected, response))
         empty = not split.claims and not abstained
         if not rejected and not empty:

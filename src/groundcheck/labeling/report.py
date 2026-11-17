@@ -6,9 +6,87 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
+from groundcheck.generation.modes import MODES
 from groundcheck.generation.pipeline import CandidateRecord
 from groundcheck.labeling.schema import EDGE_CASES, LABELS, LabelRecord
 from groundcheck.labeling.store import claim_items, write_jsonl_atomic
+
+DEFAULT_TARGET = 300  # claims in the balanced labeled set (docs/labeling_guide.md)
+# Unanswerable questions end in an abstention, which has no claims to label.
+ANSWERABLE_QTYPES = ("numeric_lookup", "table", "multi_step", "yes_no", "temporal")
+
+
+def progress_to_target(
+    all_records: list[LabelRecord],
+    candidates: list[CandidateRecord],
+    target: int = DEFAULT_TARGET,
+    companies: list[str] | None = None,
+) -> str:
+    """A one-screen summary: confirmed labels per label, company, mode and question
+    type, against an even share of `target` claims, and how many more each needs.
+
+    Only confirmed, valid labels count: those are what `export-labels` writes. An even
+    share is `target` divided by the number of values of that dimension (rounded up):
+    the three labels, the three generation modes, the answerable question types, and
+    `companies` (the labeled companies of config/companies.yaml; without it, the
+    companies that occur in the candidates or the labels). Labels cannot be planned (they depend on
+    what the model answered), so their "need" says which kind of claim to look for,
+    e.g. by labeling more no-context or wrong-context candidates when contradicted and
+    unsupported are short."""
+    done = [r for r in all_records if r.confirmed and not r.invalid]
+    unconfirmed = sum(1 for r in all_records if not r.confirmed and not r.invalid)
+    mode_of = {c.candidate_id: c.mode for c in candidates}
+    available: dict[str, Counter] = {name: Counter() for name in ("company", "mode", "qtype")}
+    labeled_ids = {r.claim_id for r in all_records}
+    for c in candidates:
+        left = sum(claim.claim_id not in labeled_ids for claim in c.claims)
+        available["company"][c.ticker] += left
+        available["mode"][c.mode] += left
+        available["qtype"][c.qtype] += left
+    dimensions = [
+        ("Label", "label", lambda r: r.label, list(LABELS)),
+        ("Company", "company", lambda r: r.ticker, companies),
+        ("Mode", "mode", lambda r: mode_of.get(r.candidate_id, "(unknown)"), list(MODES)),
+        ("Question type", "qtype", lambda r: r.qtype, list(ANSWERABLE_QTYPES)),
+    ]
+    n = len(done)
+    lines = [
+        f"PROGRESS TO TARGET: {n} of {target} confirmed claims ({min(n / target, 1):.0%}); "
+        f"{max(target - n, 0)} to go"
+        + (f"; {unconfirmed} labeled but not confirmed (not counted)" if unconfirmed else ""),
+    ]
+    short: list[str] = []
+    for title, key, value_of, fixed in dimensions:
+        have = Counter(value_of(r) for r in done)
+        seen = sorted(set(have) | {v for v, n in available.get(key, {}).items() if n})
+        values = [*fixed, *(v for v in seen if v not in fixed)] if fixed else seen
+        if not values:
+            continue
+        share = -(-target // len(values))  # ceiling
+        lines.append(f"{title} (even share: {share} each)")
+        lines.append(
+            f"  {'':<16} {'have':>5} {'need':>5}" + ("  unlabeled" if key != "label" else "")
+        )
+        for value in values:
+            need = max(share - have[value], 0)
+            row = f"  {value[:16]:<16} {have[value]:>5} {need:>5}"
+            if key != "label":
+                left = available[key][value]
+                row += f"  {left:>9}"
+                if need > left:
+                    short.append(f"{value} (needs {need}, {left} unlabeled)")
+            lines.append(row)
+    if n >= target:
+        lines.append("Target size reached; the need columns show what is still uneven.")
+    if short:
+        lines.append("Too few unlabeled claims for an even share of: " + "; ".join(short) + ".")
+        lines.append("  Generate more candidates for those (scripts/generate_candidates.py).")
+    if n < target:
+        plan = f"groundcheck label-plan --claims {target - n}"
+        lines.append(f"Next: {plan} && groundcheck label --plan data/labels/label_plan.json")
+    else:
+        lines.append("Next: groundcheck label-check && groundcheck export-labels")
+    return "\n".join(lines)
 
 
 def _counter_table(title: str, counter: Counter, order: list[str] | None = None) -> list[str]:
@@ -53,7 +131,8 @@ def label_stats(all_records: list[LabelRecord], candidates: list[CandidateRecord
 
 
 def _shown(r: LabelRecord) -> bool:
-    return bool(r.assistance and r.assistance.label_suggestion_shown)
+    """A label suggestion was shown for this claim at any time (not only the last pass)."""
+    return bool(r.suggestions_seen)
 
 
 def assistance_stats(records: list[LabelRecord]) -> list[str]:
@@ -62,12 +141,15 @@ def assistance_stats(records: list[LabelRecord]) -> list[str]:
     without = [r for r in records if not _shown(r)]
     lines = ["Label suggestions (--suggest):"]
     if with_s:
-        agreed = sum(bool(r.assistance.agreed) for r in with_s)
+        agreed = sum(bool(r.suggestions_seen[-1].agreed) for r in with_s)
         lines.append(
             f"  shown for {len(with_s)} label(s); you agreed with {agreed} "
             f"({agreed / len(with_s):.0%})"
         )
-        by_verifier = Counter(r.assistance.suggestion_verifier for r in with_s)
+        kept = sum(any(a.kept_existing for a in r.suggestions_seen) for r in with_s)
+        if kept:
+            lines.append(f"  of those, {kept} label(s) were kept with Enter after a suggestion")
+        by_verifier = Counter(v for r in with_s for v in r.suggestion_verifiers)
         lines.append(
             "  by verifier: " + ", ".join(f"{k} {v}" for k, v in sorted(by_verifier.items()))
         )
@@ -149,6 +231,16 @@ def check_labels(
     return records, problems
 
 
+def evidence_source(record: LabelRecord) -> str:
+    """How the gold evidence was chosen: `suggestion_accepted` (the one-key suggestion,
+    picked by the same lexical rule the cross-encoder verifiers cite spans with),
+    `hand_pasted`, or `none` (unsupported labels have no evidence)."""
+    if not record.evidence:
+        return "none"
+    accepted = bool(record.assistance and record.assistance.evidence_accepted)
+    return "suggestion_accepted" if accepted else "hand_pasted"
+
+
 def export_record(record: LabelRecord, candidate: CandidateRecord) -> dict:
     return {
         "claim_id": record.claim_id,
@@ -165,6 +257,15 @@ def export_record(record: LabelRecord, candidate: CandidateRecord) -> dict:
         "evidence": [s.model_dump() for s in record.evidence],
         "edge_case": record.edge_case,
         "note": record.note,
+        # What the annotator was shown (labeling/assist.py): eval-verifiers breaks its
+        # results down by these, because a shown label can anchor the annotator towards
+        # the suggesting verifier and an accepted evidence suggestion makes span
+        # agreement circular for verifiers that pick spans the same way.
+        "assistance": record.assistance.model_dump() if record.assistance else None,
+        "suggestion_history": [a.model_dump() for a in record.suggestion_history],
+        "label_suggestion_shown": bool(record.suggestions_seen),
+        "suggestion_verifiers": record.suggestion_verifiers,
+        "evidence_source": evidence_source(record),
         "passages": [
             {"rank": c.rank, "chunk_id": c.chunk_id, "text": c.text} for c in candidate.retrieved
         ],

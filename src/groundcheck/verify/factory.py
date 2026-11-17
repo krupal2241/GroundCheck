@@ -1,6 +1,7 @@
 """Build a verifier by name.
 
     fake       lexical rule, no model (tests, dry runs, the offline demo)
+    numeric    rule-based number matching under unit normalization, no model (a baseline)
     prompted   a local LLM through the provider layer (Ollama by default)
     minicheck  lytang/MiniCheck-DeBERTa-v3-Large    ([verifiers] extra)
     hhem       vectara/hallucination_evaluation_model ([verifiers] extra)
@@ -18,7 +19,7 @@ from groundcheck.config import LLMConfig, load_llm_config
 from groundcheck.llm.base import LLMRequest
 from groundcheck.verify.base import Verifier, VerifierError
 
-VERIFIER_NAMES = ("fake", "prompted", "minicheck", "hhem", "finetuned")
+VERIFIER_NAMES = ("fake", "numeric", "prompted", "minicheck", "hhem", "finetuned")
 
 
 @dataclass
@@ -48,6 +49,10 @@ def make_verifier(name: str, options: VerifierOptions | None = None) -> Verifier
         from groundcheck.verify.fake import FakeVerifier
 
         return FakeVerifier()
+    if name == "numeric":
+        from groundcheck.verify.numeric import NumericVerifier
+
+        return NumericVerifier()
     if name == "prompted":
         from groundcheck.llm.factory import make_provider
         from groundcheck.verify.prompted import PromptedLLMVerifier

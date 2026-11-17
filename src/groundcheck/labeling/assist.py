@@ -3,7 +3,9 @@
 1. **Evidence span** (deterministic, always available): every retrieved chunk is cut
    into units (table rows; sentences in prose, `verify.spans.units`) and the unit
    containing the most of the claim's numbers (weighted 3x) and content words is
-   offered. It is checked to be an exact substring of its chunk after whitespace
+   offered. Numbers are compared by value (`groundcheck.finnum`), so a claim's "$89.3
+   billion" finds the table row with "89,300" (in millions). It is checked to be an
+   exact substring of its chunk after whitespace
    normalization (the gold-span rule) before it is shown. It is offered only *after*
    the annotator has chosen supported or contradicted, so it can't steer the label,
    only save copy-pasting; one key (`a`) accepts it.
@@ -18,6 +20,7 @@
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from groundcheck.finnum import scale_hint
 from groundcheck.generation.pipeline import RetrievedChunk
 from groundcheck.labeling.schema import EvidenceSpan, make_span
 from groundcheck.retrieval.evaluate import normalize_for_match
@@ -38,8 +41,9 @@ def suggest_span(claim: str, chunks: list[RetrievedChunk]) -> SpanSuggestion | N
     best: tuple[float, int, int, int] | None = None
     found: SpanSuggestion | None = None
     for chunk in sorted(chunks, key=lambda c: c.rank):
+        hint = scale_hint(chunk.text)  # "(in millions)": the scale of the table's cells
         for position, unit in enumerate(units(chunk.text)):
-            score = overlap_score(claim, unit)
+            score = overlap_score(claim, unit, hint)
             if score <= 0:
                 continue
             key = (-score, chunk.rank, len(unit), position)

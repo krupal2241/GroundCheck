@@ -187,7 +187,7 @@ def test_minicheck_is_binary_and_scores_each_chunk(monkeypatch):
     assert supported.label == "supported" and supported.score > 0.99
     assert supported.evidence.chunk_id == "EXCO-7-p0000"
     assert supported.details["best_chunk"] == "EXCO-7-p0000"
-    texts, claims, kwargs = recorder.tokenized[-1]
+    texts, claims, kwargs = recorder.tokenized[0]  # [1] is the untimed truncation count
     assert texts == [c.text for c in CHUNKS] and claims == [SUPPORTED] * 3
     assert kwargs["truncation"] == "only_first" and kwargs["max_length"] == 512
     # A binary model never says contradicted: a wrong number is just "not supported".
@@ -251,7 +251,7 @@ def test_hf_verifiers_without_the_extra_are_a_clean_error(monkeypatch, name):
 
 
 def test_factory_names_and_unknown():
-    assert VERIFIER_NAMES == ("fake", "prompted", "minicheck", "hhem", "finetuned")
+    assert VERIFIER_NAMES == ("fake", "numeric", "prompted", "minicheck", "hhem", "finetuned")
     assert isinstance(make_verifier("fake"), FakeVerifier)
     with pytest.raises(VerifierError, match="unknown verifier"):
         make_verifier("oracle")

@@ -291,7 +291,7 @@ def run(
     batch_size: int = 10,
     limit: int | None = None,
     sleep_between_batches: float = 0.0,
-    sleep: Callable[[float], None] = time.sleep,
+    sleep: Callable[[float], None] | None = None,
     echo: Callable[[str], None] = print,
 ) -> RunSummary:
     """Generate every question that has no record yet, in batches; see module docs."""
@@ -312,7 +312,7 @@ def run(
     for number, batch in enumerate(batches(pending, batch_size)):
         if number > 0 and sleep_between_batches > 0:
             echo(f"  sleeping {sleep_between_batches:g}s between batches")
-            sleep(sleep_between_batches)
+            (sleep or time.sleep)(sleep_between_batches)
         for question in batch:
             position += 1
             prefix = f"[{position}/{len(pending)}] {question.id} ({question.qtype})"

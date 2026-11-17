@@ -1,36 +1,56 @@
 # Synthetic training data for the fine-tuned verifier (`groundcheck build-training-data`).
 #
-# Splits are BY COMPANY: all of a company's examples go to one split, and unsupported
-# pairs that borrow evidence from another company stay within the split.
+# Splits are BY COMPANY, and inside a training company BY ITEM:
+#
+#   train  JPM and BRK-B, every Item except the ones under `dev_items`
+#   dev    the `dev_items` of JPM and BRK-B (model selection only: picks the epoch)
+#   test   the six labeled companies (AAPL, MSFT, AMZN, WMT, XOM, JNJ)
 #
 # The hand-labeled gold set never enters training, whatever is listed here: every chunk
-# that was retrieved for a candidate (all gold passages included) and every gold claim
-# are excluded in code (see docs/DESIGN.md, Part 3).
-#
-# Splits: train JPM, dev BRK-B, test = the six labeled companies.
+# that was retrieved for a candidate (all gold passages included), every other chunk
+# that contains a gold evidence span, and every gold claim are excluded in code (see
+# docs/DESIGN.md, Part 3 and "Audit fixes").
 #
 # Why no labeled company trains: the hand-labeled test set is drawn from AAPL, MSFT,
 # AMZN, WMT, XOM and JNJ. Excluding their gold chunks and claims stops literal
 # leakage, but training on the rest of the same filing still teaches the model that
 # company's vocabulary, table layouts and segment names, which flatters the gold-set
-# score. JPM and BRK-B have no hand-labeled questions, so the fine-tuned verifier is
-# evaluated on companies it has never seen, and the synthetic test split (the six
-# labeled companies, gold chunks removed) measures the same thing on synthetic data.
-# BRK-B is dev (model selection only): a long, mixed filing (insurance, rail, energy)
-# unlike JPM's bank filing, so the chosen epoch is not tuned to one industry.
-# Cost: one training company gives a less varied training set; `build-training-data`
-# warns when the train split has fewer than 500 examples.
+# score. JPM and BRK-B have no hand-labeled questions (and wrong-context generation
+# never borrows their passages), so the fine-tuned verifier is evaluated on companies
+# it has never seen, and the synthetic test split (the six labeled companies, gold
+# chunks removed) measures the same thing on synthetic data.
+#
+# Why two training companies and Item-level dev: with JPM alone there was no second
+# company in the train split, so `other_company_rate` did nothing (every unsupported
+# example paired a JPM claim with another JPM section) and the model saw one industry.
+# Training on both gives cross-company negatives and a bank plus a conglomerate
+# (insurance, rail, energy). That leaves no third unlabeled company for dev, so dev is
+# held-out Items of the same two filings. Prose windows never cross an Item, so train
+# and dev share no chunk; the build checks that no (company, Item) pair is used by two
+# splits and fails otherwise. Known limit: dev is the same two companies as train, and
+# an MD&A (Item 7) repeats figures from the statements (Item 8), so dev scores are
+# optimistic. Dev only picks the epoch; nothing reported comes from it.
+#
+# dev_items: BRK-B's MD&A (prose and financial tables, the kind of text gold claims are
+# about) and JPM's business and market sections (prose, a few tables). JPM's much
+# larger Items 7 and 8 stay in train.
+# Cost: `build-training-data` warns when the train split has fewer than 500 examples
+# (e.g. a train company without chunks, or too many Items held out for dev).
 
 seed: 13
 splits:
-  train: [JPM]
-  dev: [BRK-B]
+  train: [JPM, BRK-B]
   test: [AAPL, MSFT, AMZN, WMT, XOM, JNJ]
+dev_items:
+  JPM: ["1", "5"]
+  BRK-B: ["7"]
 
 max_seeds_per_company: 1500   # supported seeds sampled per company (each gives up to 3 examples)
+max_dev_seeds_per_company: 400  # the same, for a train company's held-out dev Items
 numeric_seed_share: 0.7       # up to this share of seeds contain a number (gold claims mostly do)
 supported_rewrite_rate: 0.5   # share of supported examples that are reworded (synonym / rescale)
 other_company_rate: 0.5       # share of unsupported examples whose evidence is another company's
+                              # (same split; needs two companies in the split to have any effect)
 partner_candidates: 60        # chunks sampled when picking an unsupported partner
 min_words: 8                  # prose sentences used as seeds: 8 to 45 words
 max_words: 45
