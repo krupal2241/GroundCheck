@@ -1747,6 +1747,118 @@ that leaves open is listed under "Needs verification on a Mac".
   recall@5 0.62, hybrid 0.63, before and after). The questions are plain English and
   contain no such tokens, so this fixes a real mismatch that this eval cannot see.
 
+## Financial-number handling (`finnum.py`, `verify/numeric.py`, BM25 flags), Tier 2
+
+Table questions score worst in retrieval, and "units and scale" is a labeling edge
+case, so numbers get one shared parser instead of three regular expressions.
+
+### (a) One module for numbers: `groundcheck/finnum.py`
+
+`parse_quantities(text)` returns a `Quantity` per number: `raw` (as written, sign
+applied), `scale` / `scale_stated` (thousand, million, billion, trillion, or "$1.2B"),
+`value` = raw x scale, `kind` (currency, percent, count, year), `decimals`, and
+`range_role` for the two ends of a range. It reads "$89.3 billion", "89,300 million",
+"4%", "(1,234)" as negative, "$391.0", "$25 billion to $27 billion", "between $25 and
+$27 billion" (the first number inherits the scale), "fiscal 2025", "FY2025" and "FY25".
+
+`same_number(a, b)` compares values. Modes: `rounding` (the project's rounding rule:
+"$12.3 billion" matches "12,345 million", "$12.4 billion" does not), `implied` (a
+table cell without a scale may be in units, thousands, millions or billions; `hint`
+from `scale_hint`, e.g. "(in millions)", narrows it to one), `raw_ok` (equal as
+written), `signed` (signs are ignored otherwise: "(4)%" is "decreased 4%").
+
+Where it is used, and what changed there:
+
+- **Claim filter** (`generation/claims.py`): a claim's number passes if the answer has
+  the same value ("$89.3 billion" vs "$89,300 million") or the same number as written
+  (as before). So the check is strictly more permissive than before, by scale
+  equivalence only. Near-duplicate detection compares numbers by value and ignores how
+  they are written.
+- **BM25 tokens** (`retrieval/bm25.py`): number tokens are canonical
+  (`finnum.number_token`: "12,345" = "12345", "391.0" = "391").
+- **Evidence-span suggestion and the verifiers' span picker** (`verify/spans.py`,
+  `labeling/assist.py`): `overlap_score` counts a claim number as present when the unit
+  has the same value under `rounding` + `implied` (+ the chunk's scale note). A claim's
+  "$89.3 billion" now finds the row "Share repurchases | 89,300 | 77,550" (in millions).
+  *Consequence for finding 4:* the suggestion and the span picker still share one rule.
+
+*Limits:* a bare four-digit integer between 1900 and 2099 is a year even when it is a
+count; "(4)" after a word is a footnote marker, not minus four, unless it fills a table
+cell; spelled-out numbers, non-dollar currencies and "basis points" are not parsed; a
+range is two numbers, not an interval (no "26 is within 25 to 27"). Property-based
+tests found and fixed two bugs while this was written (formatting noise past 12
+significant digits, a non-idempotent token for malformed input).
+
+### (b) `NumericVerifier` (`verify/numeric.py`, `--verifier numeric`)
+
+A fourth, nearly free baseline on the `Verifier` interface: no model, microseconds per
+claim. It checks the claim's numbers (years aside) against the passages:
+
+- table rows: the row label is the context, each cell a fact, the cell's period the
+  year in its column header; prose: the sentence is the context, a number's period the
+  nearest year;
+- **supported** if every claim number is found in a matching context for the same
+  period (unit-normalized, with rounding tolerance);
+- **contradicted** if a number is missing but a matching context has a different number
+  of the same kind for the same period, or a table cell's sign disagrees with the
+  claim's direction word;
+- **unsupported** otherwise, and for **every claim without a number** (it has no
+  opinion there; `details["no_numbers"]`).
+
+*Limits, stated plainly:* it does not read. A matching number, period and row label is
+"supported" whatever the sentence says about it. Direction and negation are checked
+only against signed table cells. Derived numbers (a difference, a growth rate the
+passage does not print) are not computed. Context is word overlap, so a different
+metric with similar words can give a false "contradicted". Without a scale note a
+scale error against a bare table cell is invisible. Its recall on supported claims
+without numbers is zero by construction. It is the floor a model must beat on numeric
+claims, not a competitor on the rest; read it per edge-case tag.
+
+It is in `VERIFIER_NAMES`, so `eval-verifiers --verifier numeric ...` reports it in the
+same tables as the model verifiers. It has not been run on a gold set (none exists yet).
+
+### (c) Numeric aliases in the BM25 query (`number_aliases`, off by default)
+
+`finnum.expand_query` appends, for each number in the question, the same amount at
+other scales ("$89.3 billion" -> 89300, 89300000, 89300000000) and, for a table-style
+number, the next scale up ("12,345" -> 12.345, 12.3). Only the BM25 query is expanded;
+the dense model and the reranker read the question as written. Thousands-separator
+variants need no alias: BM25 tokens are already canonical.
+
+### (d) Table captions for BM25 (`table_context`, off by default)
+
+Every table chunk already repeats its column header rows, including parts split to fit
+the token limit (tested). What a table chunk lacks is its title. `groundcheck chunk
+--table-captions` records, for each table chunk, the last sentence of the nearest
+preceding non-table line of the filing (with a short unit note such as "(in millions)"
+kept) in a new `Chunk.caption` field. That is metadata: `text`, chunk IDs, gold strings,
+evidence spans and embeddings are unchanged. With `table_context: true` BM25 indexes a
+table chunk as caption + text. `--table-captions-in-text` also writes the caption into
+the chunk text; that changes stored text, renames the chunker (`-cap`) and is opt-in.
+Chunk files written without these flags are byte-identical to before (an empty caption
+is not written), so existing indexes stay valid.
+
+### Measured (30 AI-drafted retrieval questions; one question = 0.03)
+
+| Variant | recall@5 | recall@10 | MRR |
+|---|---:|---:|---:|
+| `bm25` (before Tier 1) | 0.62 | 0.65 | 0.45 |
+| `bm25` (after the tokenizer changes) | 0.62 | 0.65 | 0.45 |
+| `bm25-numbers` (both flags) | 0.62 | 0.65 | 0.45 |
+| `hybrid` (before Tier 1) | 0.63 | 0.68 | 0.47 |
+| `hybrid` (after) | 0.63 | 0.68 | 0.47 |
+| `hybrid-aliases` | 0.63 | 0.68 | 0.47 |
+| `hybrid-numbers` (both flags) | 0.63 | 0.68 | 0.47 |
+
+**Nothing moved, and that is the honest result.** The 30 questions are plain English
+("What were Apple's net sales in Greater China?"): they contain no amounts to expand
+and no "FY2025"-style tokens, and the committed chunks have no captions, so
+`table_context` is a no-op until the filings are chunked again. An earlier version of
+`table_context` also added the Item's section title; that lowered recall@5 (hybrid 0.63
+-> 0.60, BM25 0.62 -> 0.58) and was removed. The table-question recall (0.33 at 5) is
+therefore **not improved by this tier**; whether captions help is listed below as
+unverified. The default variant stays `hybrid`.
+
 ### Needs verification on a Mac
 
 Nothing below could be checked without real models, which were deliberately not run.
@@ -1771,4 +1883,15 @@ Nothing below could be checked without real models, which were deliberately not 
 6. **Existing candidates and the new resume guard.** Candidates generated before these
    fixes carry validator v1 claims; the guard does not compare the validator version.
    Regenerate (into a fresh `--out-dir` or after moving the old files) before labeling.
-
+7. **NumericVerifier on real gold labels.** It is tested on synthetic passages only.
+   After labeling, run `groundcheck eval-verifiers --verifier numeric` and read its
+   by-edge-case rows (units_scale, numeric_mismatch, temporal, rounding).
+8. **Table captions on the real filings.** Captions need the filings chunked again,
+   which changes the chunks files and makes every dense index stale. Not done here.
+   `groundcheck chunk --table-captions`, then `groundcheck eval-retrieval --variant
+   bm25-numbers` (needs no index) against `--variant bm25`; if it helps, rebuild the
+   dense index (`groundcheck index --variant hybrid`, heavy) and compare `hybrid-tablectx`.
+   Check a few captions by eye first: the "nearest preceding line" may be a footnote.
+9. **Number aliases on questions that contain amounts.** None of the 30 retrieval
+   questions has one, so the flag is untested on real retrieval. Add a few such
+   questions before deciding.

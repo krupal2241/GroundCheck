@@ -20,6 +20,15 @@ word (JNJ-1-p0001 was 632 tokens at 250 words). So when a token counter is given
 - tables between rows (each part repeats the header), and a single row that is too
   long between words.
 
+**Table captions.** A table's rows rarely say what the table is: the title ("Net sales
+by reportable segment") and the unit note ("(in millions)") are in the line above it.
+With `table_captions=True` every table chunk records that line in `Chunk.caption`
+(metadata only: `text` is unchanged, so gold strings, evidence spans and embeddings are
+unaffected). With `caption_in_text=True` the caption is also written as the first line
+of the chunk text; that changes the stored text, so the chunker's name gets a `-cap`
+suffix and it is off unless asked for. Every table chunk always repeats the table's
+header rows, including the parts of a table split to fit the token limit.
+
 Only windows that need it are split. A split window keeps its ID with a letter
 appended (`JNJ-1-p0001a`, `JNJ-1-p0001b`), so every other chunk ID stays exactly as it
 was. `max_tokens` (480) leaves headroom under bge-small's 512-token input limit.
@@ -47,6 +56,8 @@ class FixedSizeChunker:
     overlap: int = 50
     table_words: int = 120
     max_tokens: int = DEFAULT_MAX_TOKENS
+    table_captions: bool = False  # record each table's caption in Chunk.caption
+    caption_in_text: bool = False  # also put it into the chunk text (changes stored text)
     # Counts a text's tokens (special tokens included). None: no token check (tests, CI).
     count_tokens: Callable[[str], int] | None = field(default=None, compare=False, repr=False)
 
@@ -61,7 +72,8 @@ class FixedSizeChunker:
     @property
     def name(self) -> str:
         name = f"fixed-p{self.prose_words}-o{self.overlap}-t{self.table_words}"
-        return name + (f"-k{self.max_tokens}" if self.count_tokens else "")
+        name += f"-k{self.max_tokens}" if self.count_tokens else ""
+        return name + ("-cap" if self.caption_in_text else "")
 
     def fits(self, text: str) -> bool:
         return self.count_tokens is None or self.count_tokens(text) <= self.max_tokens
@@ -75,9 +87,11 @@ class FixedSizeChunker:
     def chunk_section(self, filing: ParsedFiling, section: ParsedSection) -> list[Chunk]:
         blocks = section.text.split(BLOCK_SEPARATOR)
         tables = [b for b in blocks if b.startswith(TABLE_START)]
+        keep = self.table_captions or self.caption_in_text
+        captions = table_captions(blocks) if keep else [""] * len(tables)
         prose = " ".join(b for b in blocks if not b.startswith(TABLE_START))
 
-        def make(kind: str, index: int, text: str, part: str = "") -> Chunk:
+        def make(kind: str, index: int, text: str, part: str = "", caption: str = "") -> Chunk:
             return Chunk(
                 chunk_id=chunk_id(filing.ticker, section.item, kind, index, part),
                 ticker=filing.ticker,
@@ -89,19 +103,27 @@ class FixedSizeChunker:
                 text=text,
                 word_count=len(text.split()),
                 chunker=self.name,
+                caption=caption,
             )
 
-        def make_all(kind: str, index: int, parts: list[str]) -> list[Chunk]:
+        def make_all(kind: str, index: int, parts: list[str], caption: str = "") -> list[Chunk]:
             if len(parts) == 1:
-                return [make(kind, index, parts[0])]
-            return [make(kind, index, text, part_suffix(j)) for j, text in enumerate(parts)]
+                return [make(kind, index, parts[0], caption=caption)]
+            return [
+                make(kind, index, text, part_suffix(j), caption) for j, text in enumerate(parts)
+            ]
 
         out = []
         for i, window in enumerate(self.prose_windows(prose)):
             out.extend(make_all("prose", i, self.fit_prose(window)))
-        pieces = [piece for table in tables for piece in self.row_groups(table)]
-        for i, (header, rows) in enumerate(pieces):
-            out.extend(make_all("table", i, self.fit_table(header, rows)))
+        pieces = [
+            (caption, *piece)
+            for table, caption in zip(tables, captions, strict=True)
+            for piece in self.row_groups(table)
+        ]
+        for i, (caption, header, rows) in enumerate(pieces):
+            lead = caption if self.caption_in_text else ""
+            out.extend(make_all("table", i, self.fit_table(header, rows, lead), caption))
         return out
 
     def fit_prose(self, text: str) -> list[str]:
@@ -117,20 +139,23 @@ class FixedSizeChunker:
         second = " ".join(words[cut - overlap :])
         return self.fit_prose(first) + self.fit_prose(second)
 
-    def fit_table(self, header: list[str], rows: list[str]) -> list[str]:
-        """Render a table piece, split between rows (then words) to fit `max_tokens`."""
-        text = _render(header + rows)
+    def fit_table(self, header: list[str], rows: list[str], lead: str = "") -> list[str]:
+        """Render a table piece, split between rows (then words) to fit `max_tokens`.
+        Every part repeats the header rows (and `lead`, the caption line, if given)."""
+        text = _render(header + rows, lead)
         if self.fits(text) or not rows:
             return [text]
         if len(rows) > 1:
             mid = len(rows) // 2
-            return self.fit_table(header, rows[:mid]) + self.fit_table(header, rows[mid:])
+            return self.fit_table(header, rows[:mid], lead) + self.fit_table(
+                header, rows[mid:], lead
+            )
         words = rows[0].split()
         if len(words) < 2:
             return [text]
         mid = len(words) // 2
         halves = [" ".join(words[:mid]), " ".join(words[mid:])]
-        return [part for half in halves for part in self.fit_table(header, [half])]
+        return [part for half in halves for part in self.fit_table(header, [half], lead)]
 
     def prose_windows(self, text: str) -> list[str]:
         words = text.split()
@@ -210,5 +235,44 @@ def _words(rows: list[str]) -> int:
     return sum(len(r.split()) for r in rows)
 
 
-def _render(rows: list[str]) -> str:
-    return "\n".join([TABLE_START, *rows, TABLE_END])
+def _render(rows: list[str], lead: str = "") -> str:
+    return "\n".join([*([lead] if lead else []), TABLE_START, *rows, TABLE_END])
+
+
+MAX_CAPTION_CHARS = 200
+UNIT_NOTE_MAX = 80
+
+
+def caption_of(block: str) -> str:
+    """The caption a prose block gives the table that follows it: the last sentence of
+    its last line, cut to `MAX_CAPTION_CHARS`. A short parenthesized unit note
+    ("(in millions, except per share amounts)") is kept together with the line before
+    it, which is the actual title."""
+    lines = [" ".join(line.split()) for line in block.splitlines() if line.strip()]
+    if not lines:
+        return ""
+    last = lines[-1]
+    note = ""
+    if last.startswith("(") and len(last) <= UNIT_NOTE_MAX and len(lines) > 1:
+        note, last = last, lines[-2]
+    # A paragraph that introduces a table: only its last sentence is the caption.
+    words = last.split()
+    ends = [i for i in range(1, len(words)) if is_sentence_end(words[i - 1])]
+    if ends:
+        last = " ".join(words[ends[-1] :])
+    if len(last) > MAX_CAPTION_CHARS:
+        last = last[-MAX_CAPTION_CHARS:].split(" ", 1)[-1]
+    return f"{last} {note}".strip()
+
+
+def table_captions(blocks: list[str]) -> list[str]:
+    """One caption per table block, in order: from the nearest preceding block that is
+    not a table (a heading or the paragraph that introduces the table). Tables that
+    follow each other directly share it. Empty if the section starts with a table."""
+    captions, last = [], ""
+    for block in blocks:
+        if block.startswith(TABLE_START):
+            captions.append(last)
+        elif block.strip():
+            last = caption_of(block)
+    return captions

@@ -29,6 +29,7 @@ from typing import Protocol
 
 from groundcheck.chunking.base import Chunk, chunks_path, read_chunks
 from groundcheck.config import ConfigError
+from groundcheck.finnum import expand_query
 from groundcheck.retrieval.bm25 import BM25
 from groundcheck.retrieval.embedder import Embedder, make_embedder
 from groundcheck.retrieval.index import CompanyIndex, Hit, build_company_index
@@ -39,6 +40,7 @@ from groundcheck.retrieval.variants import (
     VariantSpec,
     embedding_key,
     index_folder_name,
+    lexical_text,
     model_text,
 )
 
@@ -78,7 +80,12 @@ def describe(
     if spec.headers:
         parts.append(f"headers={HEADER_VERSION}")
     if spec.bm25:
-        parts.append("bm25")
+        extras = [
+            name
+            for name, on in (("aliases", spec.number_aliases), ("tablectx", spec.table_context))
+            if on
+        ]
+        parts.append("bm25" + ("".join(f"+{e}" for e in extras)))
     if spec.bm25 and embedder is not None:
         parts.append(f"rrf_k={config.rrf_k}")
     if reranker is not None:
@@ -136,7 +143,10 @@ class VariantRetriever:
             hits = company.index.search(self.embedder, query, pool)
             dense = [(positions[h.chunk.chunk_id], h.score) for h in hits]
         if company.bm25 is not None:
-            lexical = company.bm25.top(query, pool)
+            # Query-side number aliases help the lexical ranking only; the dense model
+            # and the reranker read the question as written.
+            lexical_query = expand_query(query) if self.spec.number_aliases else query
+            lexical = company.bm25.top(lexical_query, pool)
         if dense is not None and lexical is not None:
             ranked = rrf_merge([[p for p, _ in dense], [p for p, _ in lexical]], self.config.rrf_k)
         else:
@@ -242,6 +252,8 @@ def open_retriever(
             by_id = {c.chunk_id: (c, t) for c, t in zip(chunks, texts, strict=True)}
             chunks = [by_id[c.chunk_id][0] for c in index.chunks]
             texts = [by_id[c.chunk_id][1] for c in index.chunks]
-        bm25 = BM25([c.text for c in chunks]) if spec.bm25 else None
+        bm25 = None
+        if spec.bm25:
+            bm25 = BM25([lexical_text(c, spec.table_context) for c in chunks])
         companies[ticker] = _Company(chunks, texts, index, bm25)
     return VariantRetriever(name, spec, config, companies, embedder, reranker)

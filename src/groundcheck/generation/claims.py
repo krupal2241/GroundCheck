@@ -12,7 +12,10 @@ than a missing claim. So every proposed claim is checked by plain rules:
 - not a duplicate or near-duplicate of an earlier claim (same numbers and >= 80% of
   the same content words);
 - no "passage [n]" or bare "[n]" citation;
-- every number in it also occurs in the answer (no added facts);
+- every number in it also occurs in the answer (no added facts). Numbers are compared
+  by value (`groundcheck.finnum`), so "$89.3 billion" in the claim matches "$89,300
+  million" or "$89.30 billion" in the answer; a number that merely looks the same as
+  written also passes, as before;
 - it is about the company, not about the passages or the model: "The passages do not
   contain ...", "Apple does not have information about its cash spent ..." and "I
   cannot determine ..." are abstentions, not claims (`META_RE`).
@@ -41,6 +44,7 @@ from dataclasses import replace
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from groundcheck.finnum import find_match, number_token, parse_quantities
 from groundcheck.generation.prompts import ABSTAIN_TEXT, ClaimSplit
 from groundcheck.llm.base import LLMProvider, LLMRequest, LLMResponse
 from groundcheck.llm.structured import StructuredOutputError, generate_structured
@@ -79,7 +83,6 @@ STOPWORDS = frozenset(
     """.split()  # noqa: SIM905
 )
 
-NUMBER_RE = re.compile(r"\d[\d,]*(?:\.\d+)?")
 CITATION_RE = re.compile(r"\bpassages?\s*\[?\s*\d+\s*\]?|\[\s*\d+\s*\]", re.IGNORECASE)
 WORD_RE = re.compile(r"[A-Za-z0-9$%][A-Za-z0-9$%,.'&-]*")
 
@@ -147,6 +150,11 @@ NEGATION_WORDS = frozenset(
 )
 
 
+SCALE_WORDS = frozenset(
+    "thousand thousands million millions billion billions trillion trillions".split()  # noqa: SIM905
+)
+
+
 def is_opposing_word(word: str) -> bool:
     return (
         word in DIRECTION_WORDS
@@ -193,14 +201,26 @@ class ClaimFilterStats(BaseModel):
 
 def normalize_number(text: str) -> str:
     """'12,345' -> '12345', '89.30' -> '89.3', '5.0' -> '5'."""
-    value = text.replace(",", "").rstrip(".")
-    if "." in value:
-        value = value.rstrip("0").rstrip(".")
-    return value
+    return number_token(text.rstrip("."))
 
 
 def numbers_in(text: str) -> set[str]:
-    return {normalize_number(m.group(0)) for m in NUMBER_RE.finditer(text)}
+    """The text's numbers as written (no sign, separators or trailing zeros)."""
+    return {q.token for q in parse_quantities(text)}
+
+
+def number_values(text: str) -> set[str]:
+    """The text's numbers by value: "$89.3 billion" and "89,300 million" are the same."""
+    return {q.value_token for q in parse_quantities(text)}
+
+
+def numbers_not_in_answer(claim: str, answer: str) -> list[str]:
+    """The claim's numbers that the answer does not contain: neither the same value
+    ("$89.3 billion" vs "$89,300 million") nor the same number as written."""
+    in_answer = parse_quantities(answer)
+    return sorted(
+        {q.token for q in parse_quantities(claim) if find_match(q, in_answer, raw_ok=True) is None}
+    )
 
 
 def words_of(text: str) -> list[str]:
@@ -220,9 +240,14 @@ def content_words(text: str) -> set[str]:
 
 
 def near_duplicate(a: str, b: str) -> bool:
-    if numbers_in(a) != numbers_in(b):
+    if number_values(a) != number_values(b):
         return False
-    wa, wb = content_words(a), content_words(b)
+    # The numbers are already known to be equal by value, so how they are written
+    # ("$89.3 billion" vs "$89,300 million") must not count as a difference in words.
+    wa, wb = (
+        {w for w in content_words(text) if not any(ch.isdigit() for ch in w)} - SCALE_WORDS
+        for text in (a, b)
+    )
     if not wa or not wb:
         return wa == wb
     if any(is_opposing_word(w) for w in wa ^ wb):
@@ -244,7 +269,7 @@ def claim_problems(claim: str, answer: str, earlier: list[str]) -> list[str]:
         reasons.append(
             "about the passages or the model, not the company (an abstention is not a claim)"
         )
-    missing = sorted(numbers_in(claim) - numbers_in(answer))
+    missing = numbers_not_in_answer(claim, answer)
     if missing:
         reasons.append(f"contains number(s) not in the answer: {', '.join(missing)}")
     normalized = " ".join(words_of(claim))

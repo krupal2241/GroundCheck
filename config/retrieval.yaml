@@ -11,6 +11,17 @@
 #   bm25      true: add a BM25 ranking, merged with the dense one by reciprocal rank
 #             fusion (or BM25 alone when embedder is null)
 #   rerank    bge-reranker-base (needs the [rerank] extra) | overlap (offline fake) | null
+#   number_aliases  true: BM25 only. The numbers in the QUERY are expanded with the same
+#             amount at other scales ("$89.3 billion" -> 89300, 89300000; "12,345" ->
+#             12.345, 12.3), so a question that says billions finds a table in millions.
+#   table_context   true: BM25 only. Table chunks are indexed under their caption as
+#             well as their rows. Needs chunks written with `groundcheck chunk
+#             --table-captions` (then rebuild the dense indexes); with the committed
+#             chunks, which have no captions, it changes nothing. Stored chunk text is
+#             never changed.
+#   Both are off by default; the `*-aliases`, `*-tablectx` and `*-numbers` variants
+#   below exist so `eval-retrieval --compare` can A/B them against `hybrid`. They use
+#   the same dense index as `hybrid`, so no index has to be built for them.
 #
 # pool: candidates taken from each first-stage ranking for fusion, and reranked.
 # rrf_k: the RRF constant, score = sum of 1 / (rrf_k + rank).
@@ -58,6 +69,29 @@ variants:
     embedder: bge-base
     headers: true
     bm25: true
+  hybrid-aliases:
+    description: "hybrid + numeric aliases in the BM25 query"
+    embedder: bge-small
+    bm25: true
+    number_aliases: true
+  hybrid-tablectx:
+    description: "hybrid + table captions in the BM25 text (needs chunk --table-captions)"
+    embedder: bge-small
+    bm25: true
+    table_context: true
+  hybrid-numbers:
+    description: "hybrid + numeric query aliases + table context (both BM25 flags)"
+    embedder: bge-small
+    bm25: true
+    number_aliases: true
+    table_context: true
+  bm25-numbers:
+    description: "BM25 alone with both flags: isolates their lexical effect"
+    diagnostic: true
+    embedder: null
+    bm25: true
+    number_aliases: true
+    table_context: true
   bm25:
     description: "BM25 alone, no model: shows how much the eval rewards exact terms"
     diagnostic: true   # compared, never recommended as the default

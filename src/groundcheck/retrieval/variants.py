@@ -45,6 +45,14 @@ class VariantSpec(BaseModel):
     headers: bool = False
     bm25: bool = False
     rerank: RerankerKind | None = None
+    # BM25 only, both off by default so they can be A/B tested with --compare:
+    # expand the numbers in the QUERY with their aliases at other scales
+    # ("$89.3 billion" -> 89300, 89300000; `finnum.expand_query`);
+    number_aliases: bool = False
+    # index table chunks under their caption as well as their rows (`lexical_text`).
+    # Needs chunks written with `groundcheck chunk --table-captions`; without a
+    # recorded caption it changes nothing. The stored chunk text is never changed.
+    table_context: bool = False
 
     @model_validator(mode="after")
     def _has_a_first_stage(self) -> "VariantSpec":
@@ -52,6 +60,8 @@ class VariantSpec(BaseModel):
             raise ValueError("a variant needs an embedder, bm25, or both")
         if self.headers and self.embedder is None and self.rerank is None:
             raise ValueError("headers only apply to embedding and reranking")
+        if (self.number_aliases or self.table_context) and not self.bm25:
+            raise ValueError("number_aliases and table_context only apply to bm25")
         return self
 
     def with_overrides(
@@ -123,6 +133,22 @@ def model_text(chunk: Chunk, headers: bool, fiscal_year: str | None) -> str:
     if not headers:
         return chunk.text
     return contextual_header(chunk, fiscal_year) + "\n" + chunk.text
+
+
+def lexical_text(chunk: Chunk, table_context: bool) -> str:
+    """The text BM25 indexes for this chunk. With `table_context`, a table chunk is
+    indexed under its caption (the line above the table in the filing, recorded by
+    `groundcheck chunk --table-captions`), so a question that names the table ("net
+    sales by segment") can find rows that only say "Americas | 178,353". The table's
+    column headers are already part of every table chunk's text. A new string:
+    `chunk.text` is untouched. No caption recorded: the chunk text as it is.
+
+    The Item's section title is deliberately not added: it is the same for every table
+    of the Item, and on the 30 retrieval questions it lowered recall@5 slightly (hybrid
+    0.63 -> 0.60, BM25 0.62 -> 0.58; within noise, but not a gain)."""
+    if not table_context or chunk.kind != "table" or not chunk.caption:
+        return chunk.text
+    return chunk.caption + "\n" + chunk.text
 
 
 def embedding_key(embedder_name: str, headers: bool) -> str:

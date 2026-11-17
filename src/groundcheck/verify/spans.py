@@ -5,7 +5,9 @@ whole chunks; they say *which chunk* but not which sentence. To give every verdi
 citable span, the chunk is cut into units (table rows, and sentences inside prose
 lines) and the unit that best covers the claim's words is returned. Numbers count
 three times as much as words, because in 10-K claims the number is what the verdict
-hinges on. This is a cheap lexical choice, made only *after* the model has picked the
+hinges on, and they are compared by value (`groundcheck.finnum`): "$89.3 billion" in a
+claim matches the table cell "89,300" (in millions). This is a cheap lexical choice,
+made only *after* the model has picked the
 chunk; it never changes the label.
 
 Spans use the same convention as gold labels: whitespace-normalized text with offsets
@@ -15,6 +17,7 @@ compared with a gold span directly.
 
 import re
 
+from groundcheck.finnum import Quantity, find_match, parse_quantities, scale_hint
 from groundcheck.labeling.schema import EvidenceSpan, make_span
 from groundcheck.retrieval.evaluate import normalize_for_match
 
@@ -55,15 +58,31 @@ def units(chunk_text: str) -> list[str]:
     return [u for u in out if u]
 
 
-def overlap_score(claim: str, unit: str) -> float:
+def matched_numbers(claim: str, unit: str, hint: float | None = None) -> tuple[int, int]:
+    """(how many of the claim's distinct numbers the unit contains, how many it has).
+
+    Numbers are compared by value with `groundcheck.finnum`: units and scale are
+    normalized ("$89.3 billion" matches a table cell "89,300" in millions), correct
+    rounding to the claim's own precision counts ("$12.3 billion" matches "12,345"),
+    and a number that is identical as written always counts. `hint` is the scale the
+    table states for its cells, if known."""
+    wanted: dict[str, Quantity] = {}
+    for quantity in parse_quantities(claim):
+        wanted.setdefault(f"{quantity.kind == 'year'}:{quantity.value_token}", quantity)
+    available = parse_quantities(unit)
+    modes = {"rounding": True, "implied": True, "raw_ok": True, "hint": hint}
+    hits = sum(find_match(q, available, **modes) is not None for q in wanted.values())
+    return hits, len(wanted)
+
+
+def overlap_score(claim: str, unit: str, hint: float | None = None) -> float:
     """Share of the claim's numbers (x3) and content words found in `unit`, in [0, 1]."""
-    claim_numbers, claim_words = numbers(claim), content_words(claim)
-    total = 3 * len(claim_numbers) + len(claim_words)
+    claim_words = content_words(claim)
+    hits, n_numbers = matched_numbers(claim, unit, hint)
+    total = 3 * n_numbers + len(claim_words)
     if total == 0:
         return 0.0
-    unit_numbers, unit_words = numbers(unit), content_words(unit)
-    hit = 3 * len(claim_numbers & unit_numbers) + len(claim_words & unit_words)
-    return hit / total
+    return (3 * hits + len(claim_words & content_words(unit))) / total
 
 
 def best_unit_span(claim: str, chunk_id: str, chunk_text: str) -> EvidenceSpan | None:
@@ -71,7 +90,8 @@ def best_unit_span(claim: str, chunk_id: str, chunk_text: str) -> EvidenceSpan |
     candidates = units(chunk_text)
     if not candidates:
         return None
-    best = max(candidates, key=lambda u: (overlap_score(claim, u), -len(u)))
+    hint = scale_hint(chunk_text)
+    best = max(candidates, key=lambda u: (overlap_score(claim, u, hint), -len(u)))
     return make_span(chunk_id, chunk_text, best)
 
 

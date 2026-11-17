@@ -150,7 +150,8 @@ def cmd_chunk(args: argparse.Namespace) -> int:
     companies = [config.get(t) for t in args.only] if args.only else config.companies
     try:
         settings = (args.prose_words, args.overlap, args.table_words, args.max_tokens)
-        chunker = FixedSizeChunker(*settings)
+        in_text = args.table_captions_in_text
+        chunker = FixedSizeChunker(*settings, args.table_captions or in_text, in_text)
     except ValueError as exc:
         raise ConfigError(str(exc)) from exc
     count_tokens = load_bge_token_counter() if args.tokenizer == "bge-small" else None
@@ -843,6 +844,19 @@ def build_parser() -> argparse.ArgumentParser:
     chunk.add_argument("--prose-words", type=int, default=250)
     chunk.add_argument("--overlap", type=int, default=50)
     chunk.add_argument("--table-words", type=int, default=120)
+    chunk.add_argument(
+        "--table-captions",
+        action="store_true",
+        help="record each table's caption (the line above it) in the chunk's `caption` "
+        "field, for BM25 `table_context`; chunk text is unchanged, but the chunks file "
+        "changes, so dense indexes must be rebuilt",
+    )
+    chunk.add_argument(
+        "--table-captions-in-text",
+        action="store_true",
+        help="also write the caption as the first line of the table chunk's TEXT. This "
+        "changes stored text: existing evidence-span offsets and indexes become stale",
+    )
     chunk.add_argument(
         "--max-tokens",
         type=int,

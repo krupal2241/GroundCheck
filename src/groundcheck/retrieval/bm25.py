@@ -2,8 +2,9 @@
 
 Tokens are lowercase words and numbers (`tokenize`):
 
-- a number is one token with its thousands separators removed and its decimals kept,
-  so "12,345", "$12,345" and "12345" are the same token, and "89.3" stays "89.3";
+- a number is one token in the canonical form of `finnum.number_token`: thousands
+  separators and trailing decimal zeros removed, so "12,345", "$12,345" and "12345" are
+  the same token, "391.0" is "391", and "89.3" stays "89.3";
 - a comma only joins digits when exactly three digits follow it, so "2025,2024" is two
   years, not one number;
 - letters and digits are split, so "FY2025" gives "fy" and "2025" (and matches a
@@ -25,6 +26,8 @@ from collections import Counter
 
 import numpy as np
 
+from groundcheck.finnum import number_token
+
 # A number with proper thousands separators, a plain number, or a run of letters.
 TOKEN_RE = re.compile(r"\d{1,3}(?:,\d{3})+(?!\d)(?:\.\d+)?|\d+(?:\.\d+)?|[a-z]+")
 
@@ -38,7 +41,7 @@ def tokenize(text: str) -> list[str]:
     tokens = []
     for token in TOKEN_RE.findall(text.lower()):
         if token[0].isdigit():
-            token = token.replace(",", "")
+            token = number_token(token)  # "12,345" -> "12345", "391.0" -> "391"
         if token not in STOPWORDS:
             tokens.append(token)
     return tokens
