@@ -53,7 +53,8 @@ def label_stats(all_records: list[LabelRecord], candidates: list[CandidateRecord
 
 
 def _shown(r: LabelRecord) -> bool:
-    return bool(r.assistance and r.assistance.label_suggestion_shown)
+    """A label suggestion was shown for this claim at any time (not only the last pass)."""
+    return bool(r.suggestions_seen)
 
 
 def assistance_stats(records: list[LabelRecord]) -> list[str]:
@@ -62,12 +63,15 @@ def assistance_stats(records: list[LabelRecord]) -> list[str]:
     without = [r for r in records if not _shown(r)]
     lines = ["Label suggestions (--suggest):"]
     if with_s:
-        agreed = sum(bool(r.assistance.agreed) for r in with_s)
+        agreed = sum(bool(r.suggestions_seen[-1].agreed) for r in with_s)
         lines.append(
             f"  shown for {len(with_s)} label(s); you agreed with {agreed} "
             f"({agreed / len(with_s):.0%})"
         )
-        by_verifier = Counter(r.assistance.suggestion_verifier for r in with_s)
+        kept = sum(any(a.kept_existing for a in r.suggestions_seen) for r in with_s)
+        if kept:
+            lines.append(f"  of those, {kept} label(s) were kept with Enter after a suggestion")
+        by_verifier = Counter(v for r in with_s for v in r.suggestion_verifiers)
         lines.append(
             "  by verifier: " + ", ".join(f"{k} {v}" for k, v in sorted(by_verifier.items()))
         )
@@ -149,6 +153,16 @@ def check_labels(
     return records, problems
 
 
+def evidence_source(record: LabelRecord) -> str:
+    """How the gold evidence was chosen: `suggestion_accepted` (the one-key suggestion,
+    picked by the same lexical rule the cross-encoder verifiers cite spans with),
+    `hand_pasted`, or `none` (unsupported labels have no evidence)."""
+    if not record.evidence:
+        return "none"
+    accepted = bool(record.assistance and record.assistance.evidence_accepted)
+    return "suggestion_accepted" if accepted else "hand_pasted"
+
+
 def export_record(record: LabelRecord, candidate: CandidateRecord) -> dict:
     return {
         "claim_id": record.claim_id,
@@ -165,6 +179,15 @@ def export_record(record: LabelRecord, candidate: CandidateRecord) -> dict:
         "evidence": [s.model_dump() for s in record.evidence],
         "edge_case": record.edge_case,
         "note": record.note,
+        # What the annotator was shown (labeling/assist.py): eval-verifiers breaks its
+        # results down by these, because a shown label can anchor the annotator towards
+        # the suggesting verifier and an accepted evidence suggestion makes span
+        # agreement circular for verifiers that pick spans the same way.
+        "assistance": record.assistance.model_dump() if record.assistance else None,
+        "suggestion_history": [a.model_dump() for a in record.suggestion_history],
+        "label_suggestion_shown": bool(record.suggestions_seen),
+        "suggestion_verifiers": record.suggestion_verifiers,
+        "evidence_source": evidence_source(record),
         "passages": [
             {"rank": c.rank, "chunk_id": c.chunk_id, "text": c.text} for c in candidate.retrieved
         ],

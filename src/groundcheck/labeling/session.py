@@ -217,10 +217,39 @@ class Labeler:
             note=reason,
             labeled_at=self.now(),
             assistance=assistance,
+            suggestion_history=self.history(item),
         )
         self.store.put(record)
         self.out("  Saved: invalid claim (not labeled, never exported)")
         return "invalid"
+
+    def history(self, item: ClaimItem) -> list[Assistance]:
+        """The suggestion history a new record for this claim must carry: the old
+        record's history plus its `assistance` if that showed a label suggestion."""
+        existing = self.store.get(item.claim.claim_id)
+        if existing is None:
+            return []
+        history = list(existing.suggestion_history)
+        if existing.assistance and existing.assistance.label_suggestion_shown:
+            history.append(existing.assistance)
+        return history
+
+    def keep_existing(self, existing: LabelRecord, assistance: Assistance) -> None:
+        """Enter kept the label. If a suggestion was on screen, the annotator saw it and
+        chose not to change the label: that is recorded (the label itself is untouched)."""
+        if not assistance.label_suggestion_shown:
+            return
+        seen = assistance.model_copy(
+            update={
+                "kept_existing": True,
+                "agreed": None
+                if existing.invalid
+                else existing.label == assistance.suggested_label,
+            }
+        )
+        self.store.put(
+            existing.model_copy(update={"suggestion_history": [*existing.suggestion_history, seen]})
+        )
 
     def show_label_suggestion(self, item: ClaimItem) -> LabelSuggestion | None:
         if self.label_suggester is None:
@@ -259,6 +288,7 @@ class Labeler:
             if key == "x":
                 return self.mark_invalid(item, assistance)
             if not key and existing:
+                self.keep_existing(existing, assistance)
                 return "kept"
             if key in LABEL_KEYS:
                 break
@@ -292,6 +322,7 @@ class Labeler:
                     "note": note,
                     "labeled_at": self.now(),
                     "assistance": assistance.model_dump(),
+                    "suggestion_history": [a.model_dump() for a in self.history(item)],
                 },
                 context={"chunks": item.chunks},
             )

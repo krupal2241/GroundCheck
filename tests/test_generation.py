@@ -313,7 +313,7 @@ def test_resume_refuses_to_mix_retrieval_variants(tiny_corpus, capsys):
     capsys.readouterr()
     assert runner.main(tiny_corpus["generate_args"]("--dry-run", "--variant", "bm25")) == 2
     err = capsys.readouterr().err
-    assert "from retrieval variant 'dense', not 'bm25'" in err and "--out-dir" in err
+    assert "made with retrieval variant 'dense', not 'bm25'" in err and "--out-dir" in err
     # The same variant resumes normally.
     assert runner.main(tiny_corpus["generate_args"]("--dry-run")) == 0
 

@@ -3,7 +3,8 @@
 - `rag`: the top-k chunks retrieved for the question (the normal pipeline).
 - `no-context`: no passages at all; the model answers closed-book, from memory.
 - `wrong-context`: passages deliberately mismatched to the question: the top-k chunks
-  for the same question from a *different company's* index, or the best-ranked chunks
+  for the same question from a *different labeled company's* index (never JPM or
+  BRK-B, which train the fine-tuned verifier), or the best-ranked chunks
   of the same company that come from a *different Item* than the correct passages.
 
 A 3B model answering from good passages mostly produces supported claims, so the
@@ -47,7 +48,9 @@ class WrongContextPicker:
     """
 
     retrieve: Retriever
-    other_tickers: list[str]  # every company with an index (the question's own is skipped)
+    # The labeled companies with an index (the question's own is skipped). Never an
+    # unlabeled or stress-test company: those train the fine-tuned verifier.
+    other_tickers: list[str]
     source: WrongSource = "mixed"
     depth: int = 60  # how far down the same company's ranking to look for other Items
 
@@ -89,6 +92,6 @@ class WrongContextPicker:
                 reranked = [Hit(h.chunk, h.score, rank) for rank, h in enumerate(hits, 1)]
                 return reranked, description
         raise ConfigError(
-            f"{question_id}: no mismatched passages possible (no other company indexed and "
+            f"{question_id}: no mismatched passages possible (no other labeled company indexed and "
             "no chunk from another Item)"
         )
