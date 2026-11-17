@@ -1163,9 +1163,14 @@ million in 2024" are both kept); contains "passage [n]" or a bare "[n]"; or cont
 number that is not in the answer (commas and trailing zeros normalized, so "$12,345"
 matches "12345"). A year counts as a number, so a claim that adds "fiscal 2024" to an
 answer that only says "the previous year" is rejected: that's an added fact.
+*(Extended later: claims about the passages or the model are rejected, opposite claims
+are never near-duplicates, and numbers are compared by value, so "$89.3 billion"
+matches "$89,300 million". See "Audit fixes", findings 8 and 9, and "Financial-number
+handling".)*
 
 **Retries:** if any claim is rejected (or the list is empty for an answer that isn't
-the abstention sentence), the request is re-sent with a stricter message: the original
+an abstention; since the audit fixes that is any answer made only of statements about
+the passages or the model, not just the exact sentence), the request is re-sent with a stricter message: the original
 prompt, then every rejected claim with its reasons, then the hard rules restated. At
 most 3 retries (`claim_max_retries` in `config/llm.yaml`); each attempt still has the
 JSON-level retries of `generate_structured`. The attempt with the most valid claims
@@ -1331,7 +1336,7 @@ The risk and the rules for using `--suggest` are in `docs/labeling_guide.md`.
 
 **`groundcheck pipeline`** runs download, parse, chunk, index, eval-retrieval,
 generate (all three modes by default, `--modes` to choose), export-labels,
-eval-verifiers (`--verifiers`, default prompted, hhem, minicheck), error-report and
+eval-verifiers (`--verifiers`, default numeric, prompted, hhem, minicheck), error-report and
 report, in that order; `--from` and `--to` pick a contiguous range, `--list` prints the
 stages. Each stage calls the same entry point as its standalone command (the CLI's
 `main`, or `generate_candidates.py`'s `main`), so there is exactly one implementation of
@@ -1495,9 +1500,11 @@ retrieval"). It costs a model call per chunk and adds non-determinism; a templat
 costs nothing.
 
 **BM25** is written here (`bm25.py`, about 60 lines, numpy only): Okapi BM25, `k1 = 1.5`,
-`b = 0.75`, Lucene's non-negative IDF. It uses the same tokenizer as the hashing
+`b = 0.75`, Lucene's non-negative IDF. It originally used the same tokenizer as the hashing
 embedder, which keeps `64,377` and `2025` as single tokens, plus a short stopword list
-for question words. It is built in memory from the chunks when a retriever opens (a few
+for question words. (Since the audit fixes BM25 has its own tokens: numbers are
+canonical, so `64,377` is the token `64377`, and letters and digits are split; see
+"Audit fixes", finding 14.) It is built in memory from the chunks when a retriever opens (a few
 thousand chunks: well under a second). *Why not `rank-bm25`:* one more dependency for
 something this small, and its tokenization would be ours anyway. *Why BM25 at all:*
 10-K questions are full of exact terms that a small embedding model blurs: product
@@ -1596,8 +1603,9 @@ built in parallel. Where they meet:
   (or `--variant`), so `retrieved`, the labeling evidence, comes from the same retriever
   in every mode, and every record stores `retrieval.variant` and `retrieval.retriever`.
   `wrong-context` draws its mismatched passages through the same retriever: the
-  "other company" pool is every company that variant can search right now (its index
-  for that embedding exists, or any company with chunks for a BM25-only variant), and
+  "other company" pool is every *labeled* company that variant can search right now
+  (its index for that embedding exists, or its chunks for a BM25-only variant; JPM and
+  BRK-B are excluded since the audit fixes), and
   "other Item" asks the same retriever for its top 60. A hybrid or reranking variant
   therefore also ranks the wrong context; a test runs all three modes with a hybrid
   (headers + BM25 + RRF + reranker) and a BM25-only variant on the offline fakes.
@@ -1782,8 +1790,10 @@ Where it is used, and what changed there:
   "$89.3 billion" now finds the row "Share repurchases | 89,300 | 77,550" (in millions).
   *Consequence for finding 4:* the suggestion and the span picker still share one rule.
 
-*Limits:* a bare four-digit integer between 1900 and 2099 is a year even when it is a
-count; "(4)" after a word is a footnote marker, not minus four, unless it fills a table
+*Limits:* "percent" and "percentage points" are both read as percent, so the labeling
+guide's "rose 2%" vs "rose 2 percentage points" (contradicted) is invisible to anything
+built on this module; a bare four-digit integer between 1900 and 2099 is a year even
+when it is a count; "(4)" after a word is a footnote marker, not minus four, unless it fills a table
 cell; spelled-out numbers, non-dollar currencies and "basis points" are not parsed; a
 range is two numbers, not an interval (no "26 is within 25 to 27"). Property-based
 tests found and fixed two bugs while this was written (formatting noise past 12
@@ -1859,7 +1869,37 @@ and no "FY2025"-style tokens, and the committed chunks have no captions, so
 therefore **not improved by this tier**; whether captions help is listed below as
 unverified. The default variant stays `hybrid`.
 
-### Needs verification on a Mac
+## Usability and safety (`doctor.py`, `--cooldown-seconds`, `label-stats`), Tier 3
+
+- **`groundcheck doctor`** checks, without loading a model: Python >= 3.11; each
+  optional extra (by looking for its packages, not importing them); that Ollama answers
+  at the configured URL and has the configured model; free disk space (warn under 5 GB,
+  fail under 1 GB); `SEC_USER_AGENT`; the data folder of every stage, with the command
+  that creates it; and whether any `*_API_KEY` environment variable is set. The last
+  one is a warning with the variable names only (values are never printed) and the
+  `unset` command: the policy is $0, nothing here calls a paid API, and a key in the
+  environment is how one would start to by accident. Exit code 1 only on a `[FAIL]`
+  (wrong Python, almost no disk); warnings exit 0, because an extra you do not use or
+  Ollama being off while you label is fine.
+- **`--cooldown-seconds N`** (default 0) for `groundcheck index` (between companies),
+  `groundcheck eval-verifiers` (between verifiers and after every 25 claims) and
+  `scripts/generate_candidates.py` (between batches; the same as the older
+  `--sleep-between-batches`, the larger of the two wins). The pauses are outside every
+  check and are subtracted from the wall time, so latency and throughput do not change.
+  Recommended on a fanless MacBook Air: generation `--batch-size 5 --cooldown-seconds
+  60` (what `make generate` does); index 30 to 60; eval-verifiers 30. These are starting
+  points from the existing Makefile setting, not measurements.
+- **`groundcheck label-stats`** ends with a one-screen "progress to target": confirmed,
+  valid labels (what `export-labels` writes) per label, company, mode and question type,
+  against an even share of the target (default 300 claims: 100 per label and per mode,
+  50 per labeled company, 60 per answerable question type), how many more each needs,
+  and how many unlabeled claims the candidates still hold for it. `--target N` changes
+  the size, `--summary-only` prints only the summary. Labels cannot be planned (they
+  depend on what the model answered); a short label is a hint to label more no-context
+  or wrong-context candidates.
+- **The pipeline's default verifiers** are now numeric, prompted, hhem, minicheck.
+
+## Needs verification on a Mac
 
 Nothing below could be checked without real models, which were deliberately not run.
 

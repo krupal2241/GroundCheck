@@ -60,9 +60,12 @@ sentences. It can learn the rules' artifacts (an inserted "not", a templated tab
 sentence) rather than groundedness, so its synthetic dev/test scores overstate how it
 handles real model errors; label noise in the rules caps what it can learn.
 
-**Mitigation.** The gold set never enters training (gold chunks, all candidate chunks
-and gold claims are excluded in code); no labeled company is in train or dev, so the
-gold-set score is on unseen companies; the model card and every report say which
+**Mitigation.** The gold set never enters training (gold chunks, all candidate chunks,
+every other chunk containing a gold evidence span, and gold claims are excluded in
+code); no labeled company is in train or dev, and wrong-context generation never
+borrows the training companies' passages, so the gold-set score is on unseen companies.
+Not mitigated: dev is held-out Items of the two training filings, so it is not
+independent of train (it only picks the epoch); the model card and every report say which
 numbers are synthetic. Only gold-set numbers are compared with the other verifiers.
 
 ## Other threats
@@ -77,9 +80,24 @@ numbers are synthetic. Only gold-set numbers are compared with the other verifie
   `claim_filter` statistics are kept in every candidate.
 - **Binary verifiers on a three-way task.** MiniCheck and HHEM can't predict
   contradicted; their three-way scores are low by construction. Compare on the binary
-  column.
+  column. The per-tag, per-company and per-mode tables show supported-vs-not accuracy
+  for them (marked †), so a † cell and a three-way cell in one row are different
+  metrics; the per-verifier sections of `verifier_eval.md` have both columns.
+- **Parse errors.** A prompted verdict with no parseable JSON is scored as unsupported,
+  a free correct answer when the gold label is unsupported; accuracy with parse errors
+  counted as wrong is reported next to it.
+- **Subset runs.** Rows computed with `--company` or `--limit` are flagged (different
+  n or claim-set hash); do not compare them with full runs.
+- **Evidence agreement is partly circular.** A gold span accepted from the one-key
+  suggestion was picked by the same lexical rule the cross-encoder verifiers cite spans
+  with; agreement is reported separately for hand-pasted spans, the independent figure.
+- **The numeric baseline does not read.** `NumericVerifier` matches numbers, periods
+  and row labels only; it is unsupported on every claim without a number. It is a
+  floor for numeric claims, not a fourth competitor overall.
 - **Latency is hardware-specific.** Measured on one machine (an M-series Air, which
   throttles under sustained load). Relative order is more trustworthy than the
   absolute milliseconds.
 - **Anchoring.** If label suggestions were used, labels may lean towards the
-  suggesting verifier; `label-stats` reports how many labels were assisted.
+  suggesting verifier; `label-stats` reports how many labels were assisted and
+  `eval-verifiers` reports each verifier's score on labels made with and without a
+  suggestion on screen. Compare verifiers on the "not shown" row.

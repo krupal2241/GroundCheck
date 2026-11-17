@@ -44,12 +44,13 @@ flowchart LR
         L --> G[(gold_labels.jsonl<br/>confirmed only)]
     end
     subgraph Eval["Benchmark"]
+        G --> V0[numeric rules<br/>baseline, no model]
         G --> V1[prompted LLM judge]
         G --> V2[MiniCheck]
         G --> V3[HHEM]
         G --> V4[fine-tuned DeBERTa-v3-small]
-        C -->|synthetic perturbations,<br/>gold chunks excluded,<br/>split by company| T[training data] --> V4
-        V1 & V2 & V3 & V4 --> E[eval-verifiers<br/>accuracy, macro-F1,<br/>latency, cost]
+        C -->|synthetic perturbations,<br/>gold chunks excluded,<br/>split by company and Item| T[training data] --> V4
+        V0 & V1 & V2 & V3 & V4 --> E[eval-verifiers<br/>accuracy, macro-F1,<br/>latency, cost]
         E --> ER[error-report]
         E --> REP[report<br/>README, RESULTS.md, charts]
     end
@@ -157,6 +158,15 @@ ollama pull llama3.2:3b && groundcheck llm-info
 ```
 
 ```bash
+groundcheck doctor
+```
+
+`doctor` checks the Python version, the installed extras, that Ollama answers and has
+the model, free disk space, `SEC_USER_AGENT` and the data folders, and prints the fix
+for anything missing. It also warns if any `*_API_KEY` variable is set: this project
+costs $0 and calls no paid API.
+
+```bash
 groundcheck pipeline --to generate
 ```
 
@@ -165,7 +175,11 @@ the FAISS indexes for the default retrieval variant (`default` in
 `config/retrieval.yaml`, under `data/index/<embedding>/`), evaluates retrieval and
 generates candidates in all three modes with that retriever. Generation is resumable:
 interrupt it and run the command again. On a fanless Air, `make generate` runs it in
-batches of 5 with a 60-second pause. A free Colab T4 can do the generation instead
+batches of 5 with a 60-second pause. The long-running commands take
+`--cooldown-seconds N` (default 0) for the same purpose: `scripts/generate_candidates.py`
+pauses between batches (try 60 with `--batch-size 5`), `groundcheck index` between
+companies (try 30 to 60), and `groundcheck eval-verifiers` between verifiers and after
+every 25 claims (try 30). Pauses are not counted in latency or throughput. A free Colab T4 can do the generation instead
 (`notebooks/generate_candidates_colab.ipynb`). `--variant NAME` picks another variant
 for the index, eval-retrieval and generate stages.
 
@@ -196,6 +210,10 @@ groundcheck label --plan data/labels/label_plan.json --only-unlabeled
 groundcheck label-stats
 ```
 
+`label-stats` ends with a one-screen progress summary: confirmed claims per label,
+company, mode and question type against an even share of 300 (`--target N`), and how
+many more each needs (`--summary-only` prints just that).
+
 And benchmark and report:
 
 ```bash
@@ -213,7 +231,7 @@ On 8 GB, the verifiers run one at a time (each is freed before the next loads).
 | Retrieval eval | `groundcheck eval-retrieval` | `data/eval/results/retrieval_*.json` |
 | Candidates | `python scripts/generate_candidates.py --mode {rag,no-context,wrong-context}` | `data/candidates/*.jsonl` |
 | Gold set | `groundcheck label-check && groundcheck export-labels` | `data/eval/gold_labels.jsonl` |
-| Verifiers | `groundcheck eval-verifiers --verifier prompted hhem minicheck` | `results/verifier_eval.{json,md}`, `results/predictions/` |
+| Verifiers | `groundcheck eval-verifiers --verifier numeric prompted hhem minicheck` | `results/verifier_eval.{json,md}`, `results/predictions/` |
 | Fine-tuned verifier | `notebooks/finetune_verifier_colab.ipynb`, then `--verifier finetuned --finetuned-path models/...` | `models/` (not committed) |
 | Error analysis | `groundcheck error-report` | `results/error_report.md` |
 | Report | `groundcheck report` | this README's results, `docs/RESULTS.md`, `docs/figures/` |
@@ -240,7 +258,13 @@ Ollama build can change outputs even at temperature 0.
 - **Synthetic training data** for the fine-tuned verifier; its synthetic scores
   overstate real accuracy ([docs/MODEL_CARD.md](docs/MODEL_CARD.md)).
 - **MiniCheck and HHEM are binary;** their three-way scores are low by construction.
-  Compare them on the supported-vs-not column.
+  Compare them on the supported-vs-not column (the breakdown tables already do, marked †).
+- **The numeric baseline only matches numbers** (with unit and scale normalization). It
+  is unsupported on every claim without a number and does not read the sentence around
+  a number; it is the floor a model has to beat on numeric claims.
+- **Nothing in the retrieval work so far improved table questions** (recall@5 0.33 for
+  that type). Table captions for BM25 are implemented but untested on the real filings
+  (docs/DESIGN.md, "Needs verification on a Mac").
 - **English 10-Ks of eight large US companies,** one fiscal year each.
 
 ## Docs
