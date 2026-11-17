@@ -499,12 +499,19 @@ def verifier_options(args: argparse.Namespace) -> VerifierOptions:
 
 def cmd_eval_verifiers(args: argparse.Namespace) -> int:
     gold = load_gold(args.gold)
+    gold_total = len(gold)
     if args.company:
         gold = [g for g in gold if g.ticker in args.company]
     if args.limit is not None:
         gold = gold[: args.limit]
     if not gold:
         raise ConfigError("no gold labels left after --company/--limit")
+    if len(gold) != gold_total:
+        print(
+            f"NOTE: evaluating a subset ({len(gold)} of {gold_total} gold claims). Rows "
+            "computed on different claims are flagged in verifier_eval.md; re-run every "
+            "verifier on the same claims before comparing them."
+        )
     if args.hf_model and len(args.verifier) > 1:
         raise ConfigError("--hf-model applies to one verifier; run them one at a time")
     options = verifier_options(args)
@@ -517,6 +524,8 @@ def cmd_eval_verifiers(args: argparse.Namespace) -> int:
         args.gold,
         args.results_dir,
         prices,
+        gold_total=gold_total,
+        cooldown_seconds=getattr(args, "cooldown_seconds", 0.0),
     )
     print(f"Wrote {args.results_dir / 'verifier_eval.json'} and verifier_eval.md")
     print(f"Per-claim predictions: {args.results_dir / 'predictions'}/")

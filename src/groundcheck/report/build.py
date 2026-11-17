@@ -37,7 +37,12 @@ from pydantic import ValidationError
 from groundcheck.config import REPO_ROOT
 from groundcheck.labeling.schema import LABELS
 from groundcheck.retrieval.evaluate import RetrievalReport
-from groundcheck.verify.evaluate import EvalResults, VerifierReport
+from groundcheck.verify.evaluate import (
+    NOT_SHOWN,
+    EvalResults,
+    VerifierReport,
+    comparability_warnings,
+)
 
 COMPARE_FILE = "compare.json"
 RESULTS_START = "<!-- RESULTS:START -->"
@@ -249,36 +254,50 @@ def verifier_table(results: EvalResults | None) -> list[str]:
         ]
     reports = list(results.verifiers.values())
     lines = []
-    shas = {r.gold_sha256 for r in reports}
     first = reports[0]
+    sizes = sorted({r.n for r in reports})
+    evaluated = str(sizes[0]) if len(sizes) == 1 else "a different number of"
     lines += [
-        f"Gold set: {first.n} confirmed claim(s), `{Path(first.gold_file).name}` "
-        f"(sha256 `{first.gold_sha256[:12]}`).",
+        f"Gold set: `{Path(first.gold_file).name}` (sha256 `{first.gold_sha256[:12]}`); "
+        f"{evaluated} confirmed claim(s) evaluated per verifier (column n).",
         "",
     ]
-    if len(shas) > 1:
-        lines += [
-            "> **Warning:** these rows were computed on different gold files; re-run "
-            "`eval-verifiers` for all verifiers before comparing them.",
-            "",
-        ]
+    for warning in comparability_warnings(reports):
+        lines += [f"> **Warning:** {warning}", ""]
     lines += [
-        "| Verifier | Model | Accuracy | Macro-F1 | Supported vs not (acc.) | Latency p50 "
+        "| Verifier | Model | n | Accuracy | Macro-F1 | Supported vs not (acc.) | Latency p50 "
         "| Latency p95 | Cost / 1,000 checks |",
-        "|---|---|---|---|---|---|---|---|",
+        "|---|---|---|---|---|---|---|---|---|",
     ]
     for r in reports:
         lines.append(
-            f"| {r.verifier} | `{r.identity.get('model', '')}` | {_pct(r.accuracy)} | "
+            f"| {r.verifier} | `{r.identity.get('model', '')}` | {r.n} | {_pct(r.accuracy)} | "
             f"{r.macro_f1:.3f} | {_pct(r.binary.accuracy)} | {_ms(r.latency.p50_ms)} | "
             f"{_ms(r.latency.p95_ms)} | {_cost(r)} |"
         )
     for estimate in results.hosted_cost_estimates:
         lines.append(
             f"| hosted judge (**estimate only, not run**) | `{estimate.model}` | not run | "
-            f"not run | not run | not run | not run | ~{estimate.cost_per_1000_checks:.2f} "
-            f"{estimate.currency} (**estimate**) |"
+            f"not run | not run | not run | not run | not run | "
+            f"~{estimate.cost_per_1000_checks:.2f} {estimate.currency} (**estimate**) |"
         )
+    for r in reports:
+        if r.parse_errors:
+            lines += [
+                "",
+                f"{r.verifier}: {r.parse_errors} claim(s) had no parseable JSON and are "
+                "scored as unsupported; with those counted as wrong its accuracy is "
+                f"{_pct(r.accuracy_parse_errors_wrong)} (supported vs not: "
+                f"{_pct(r.binary_accuracy_parse_errors_wrong)}).",
+            ]
+        if r.truncation is not None and r.truncation.truncated_pairs:
+            t = r.truncation
+            lines += [
+                "",
+                f"{r.verifier}: {t.truncated_pairs} of {t.pairs} (chunk, claim) inputs "
+                f"exceeded the model's token limit and lost the end of the chunk "
+                f"({t.claims_affected} claim(s) affected).",
+            ]
     lines += [
         "",
         "Accuracy and macro-F1 are over three labels (supported, contradicted, "
@@ -319,6 +338,25 @@ def confusion_tables(results: EvalResults | None) -> list[str]:
     return lines
 
 
+BINARY_MARK = "†"
+BINARY_NOTE = (
+    f"{BINARY_MARK} binary verifier: it can never predict contradicted, so its three-way "
+    "accuracy on a group of contradicted claims is 0% by construction. Its cells show "
+    "supported-vs-not accuracy instead; the other verifiers' cells are three-way accuracy."
+)
+
+
+def fair_accuracy(report: VerifierReport, group) -> float:
+    """Three-way accuracy, or supported-vs-not accuracy for a binary verifier."""
+    if report.binary_model and group.binary_accuracy is not None:
+        return group.binary_accuracy
+    return group.accuracy
+
+
+def _name(report: VerifierReport) -> str:
+    return report.verifier + (BINARY_MARK if report.binary_model else "")
+
+
 def group_table(results: EvalResults | None, attr: str, title: str) -> list[str]:
     if results is None:
         return []
@@ -327,16 +365,36 @@ def group_table(results: EvalResults | None, attr: str, title: str) -> list[str]
     if not keys:
         return []
     lines = [
-        f"| {title} | " + " | ".join(r.verifier for r in reports) + " |",
+        f"| {title} | " + " | ".join(_name(r) for r in reports) + " |",
         "|---" * (len(reports) + 1) + "|",
     ]
     for key in keys:
         cells = []
         for r in reports:
             g = getattr(r, attr).get(key)
-            cells.append(f"{_pct(g.accuracy)} (n={g.n})" if g else "-")
+            cells.append(f"{_pct(fair_accuracy(r, g))} (n={g.n})" if g else "-")
         lines.append(f"| {key} | " + " | ".join(cells) + " |")
-    return [*lines, ""]
+    lines.append("")
+    if any(r.binary_model for r in reports):
+        lines += [BINARY_NOTE, ""]
+    return lines
+
+
+def suggestion_section(results: EvalResults) -> list[str]:
+    """Accuracy split by whether a verifier's label suggestion was on screen when the
+    gold label was made (`groundcheck label --suggest`). Empty if none ever was."""
+    reports = list(results.verifiers.values())
+    if not any(k != NOT_SHOWN for r in reports for k in r.by_suggestion):
+        return []
+    return [
+        "## Accuracy by label suggestion shown to the annotator",
+        "",
+        "Some gold labels were made while a verifier's proposed label was on screen. "
+        "That can anchor the annotator towards that verifier, so its score on its own "
+        '"shown" row is inflated; the "not shown" row is the unbiased comparison.',
+        "",
+        *group_table(results, "by_suggestion", "Suggestion"),
+    ]
 
 
 def balance_table(balance: dict | None) -> list[str]:
@@ -388,6 +446,7 @@ def results_markdown(inputs: Inputs, figures: list[str]) -> str:
         lines += group_table(inputs.verifier, "by_mode", "Mode") or ["No mode breakdown.", ""]
         lines += ["## Accuracy by company", ""]
         lines += group_table(inputs.verifier, "by_company", "Company")
+        lines += suggestion_section(inputs.verifier)
         lines += ["## Confusion matrices", "", *confusion_tables(inputs.verifier)]
     if figures:
         lines += ["## Charts", ""] + [f"![{Path(f).stem}](figures/{Path(f).name})" for f in figures]
@@ -494,9 +553,10 @@ def write_charts(results: EvalResults, figures_dir: Path, plt=None) -> list[str]
             offset = (i - (len(reports) - 1) / 2) * width
             present = [(t, tag) for t, tag in enumerate(tags) if tag in r.by_edge_case]
             xs = [t + offset for t, _ in present]
-            ys = [100 * r.by_edge_case[tag].accuracy for _, tag in present]
+            ys = [100 * fair_accuracy(r, r.by_edge_case[tag]) for _, tag in present]
+            label = r.verifier + (" (supported vs not)" if r.binary_model else "")
             ax.bar(xs, ys, width=width * 0.9, color=SERIES[i % len(SERIES)],
-                   edgecolor=SURFACE, linewidth=1, label=r.verifier)  # fmt: skip
+                   edgecolor=SURFACE, linewidth=1, label=label)  # fmt: skip
         n = {tag: max(r.by_edge_case[tag].n for r in reports if tag in r.by_edge_case)
              for tag in tags}  # fmt: skip
         ax.set_xticks(range(len(tags)))

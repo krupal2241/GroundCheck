@@ -18,7 +18,26 @@ Outputs, under `results/` (committed when you want the numbers in the README):
 
 Re-running with a subset of verifiers updates their entries and keeps the others, so
 you can run one model at a time on a Mac with 8 GB RAM. Each entry records the gold
-file's sha256; the Markdown flags entries computed on a different gold file.
+file's sha256 AND a hash of the claim IDs it actually evaluated (`claims_sha256`), so a
+`--company` / `--limit` run is never mistaken for a full one: the Markdown warns when
+rows were computed on different gold files or on different claims.
+
+What keeps the comparison fair (docs/DESIGN.md, "Audit fixes"):
+
+- every breakdown (edge case, company, mode, suggestion) has a three-way accuracy and a
+  **binary accuracy** (supported vs not supported). MiniCheck and HHEM can never predict
+  contradicted, so their three-way accuracy on a tag like numeric_mismatch is 0% by
+  construction; read their binary column;
+- **accuracy with parse errors counted as wrong**: the prompted verifier's verdict is
+  `unsupported` when it returns no parseable JSON, which is a free correct answer on
+  every gold-unsupported claim;
+- **by label suggestion**: labels made while a verifier's proposed label was on screen
+  (`groundcheck label --suggest`) are scored separately, by suggesting verifier;
+- **evidence agreement by gold-span source**: a gold span accepted from the one-key
+  suggestion was picked by the same lexical rule the cross-encoder verifiers cite spans
+  with, so only hand-pasted spans measure agreement independently;
+- **truncated pairs**: how many (chunk, claim) inputs exceeded the model's token limit
+  and lost the end of the chunk (MiniCheck, the fine-tuned model).
 """
 
 import datetime as dt
@@ -43,6 +62,8 @@ from groundcheck.verify.costs import CostEstimate, Prices, approx_tokens, estima
 
 DEFAULT_RESULTS_DIR = REPO_ROOT / "results"
 NO_TAG = "(none)"
+NOT_SHOWN = "not shown"
+EVIDENCE_SOURCES = ("suggestion_accepted", "hand_pasted")
 BINARY_VERIFIERS = ("minicheck", "hhem")
 
 
@@ -72,7 +93,17 @@ class GoldRecord(BaseModel):
     edge_case: EdgeCase | None = None
     note: str = ""
     mode: str = "rag"  # generation mode of the candidate (exports before modes: rag)
+    # Labeling assistance (exports before the audit fixes have none of these).
+    label_suggestion_shown: bool = False
+    suggestion_verifiers: list[str] = []
+    evidence_source: str = ""  # suggestion_accepted | hand_pasted | none | "" (unknown)
     passages: list[GoldPassage]
+
+    @property
+    def suggestion(self) -> str:
+        if not self.label_suggestion_shown:
+            return NOT_SHOWN
+        return "shown: " + "+".join(self.suggestion_verifiers or ["(unknown)"])
 
     @property
     def chunks(self) -> list[EvidenceChunk]:
@@ -108,6 +139,11 @@ def file_sha256(path: Path) -> str:
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
+def claims_sha256(claim_ids: list[str]) -> str:
+    """A hash of the set of claims a row was computed on (order does not matter)."""
+    return hashlib.sha256("\n".join(sorted(claim_ids)).encode("utf-8")).hexdigest()
+
+
 # --- Running a verifier -----------------------------------------------------------------
 
 
@@ -125,6 +161,8 @@ class Prediction(BaseModel):
     evidence: EvidenceSpan | None
     latency_ms: float
     parse_error: bool = False
+    suggestion: str = NOT_SHOWN  # the label suggestion shown to the annotator, if any
+    evidence_source: str = ""  # how the gold evidence span was chosen
     details: dict[str, Any] = {}
 
 
@@ -152,6 +190,8 @@ def run_verifier(
                 evidence=result.evidence,
                 latency_ms=result.latency_ms,
                 parse_error="parse_error" in result.details,
+                suggestion=record.suggestion,
+                evidence_source=record.evidence_source,
                 details=_small(result.details),
             )
         )
@@ -182,9 +222,22 @@ class ClassMetrics(BaseModel):
 
 
 class GroupMetrics(BaseModel):
+    """Three-way accuracy and, next to it, binary accuracy (supported vs not supported),
+    the only fair one for a binary verifier. None: a file written before it existed."""
+
     n: int
     correct: int
     accuracy: float
+    binary_correct: int | None = None
+    binary_accuracy: float | None = None
+
+
+class TruncationStats(BaseModel):
+    """(chunk, claim) inputs longer than the model's token limit: the chunk's end was cut."""
+
+    pairs: int
+    truncated_pairs: int
+    claims_affected: int
 
 
 class BinaryMetrics(BaseModel):
@@ -227,9 +280,17 @@ class VerifierReport(BaseModel):
     by_edge_case: dict[str, GroupMetrics]
     by_company: dict[str, GroupMetrics]
     by_mode: dict[str, GroupMetrics] = {}
+    by_suggestion: dict[str, GroupMetrics] = {}
     latency: LatencyMetrics
     evidence_agreement: EvidenceAgreement
+    evidence_agreement_by_source: dict[str, EvidenceAgreement] = {}
     parse_errors: int
+    # The same accuracies with every parse error counted as a wrong prediction.
+    accuracy_parse_errors_wrong: float | None = None
+    binary_accuracy_parse_errors_wrong: float | None = None
+    truncation: TruncationStats | None = None  # None: the verifier does not report it
+    claims_sha256: str = ""  # of the claim IDs evaluated (differs under --company/--limit)
+    gold_total: int | None = None  # claims in the gold file
     local: bool
     cost_per_1000_checks_usd: float | None  # 0.0 when local; None when not local
     gold_file: str
@@ -274,8 +335,30 @@ def group_metrics(predictions: list[Prediction], key: Callable[[Prediction], str
     for name in sorted(groups):
         items = groups[name]
         correct = sum(p.gold == p.predicted for p in items)
-        out[name] = GroupMetrics(n=len(items), correct=correct, accuracy=correct / len(items))
+        binary = sum(binary_correct(p) for p in items)
+        out[name] = GroupMetrics(
+            n=len(items),
+            correct=correct,
+            accuracy=correct / len(items),
+            binary_correct=binary,
+            binary_accuracy=binary / len(items),
+        )
     return out
+
+
+def binary_correct(p: "Prediction") -> bool:
+    return (p.gold == "supported") == (p.predicted == "supported")
+
+
+def truncation_stats(predictions: list[Prediction]) -> TruncationStats | None:
+    counted = [p.details for p in predictions if isinstance(p.details.get("truncated_pairs"), int)]
+    if not counted:
+        return None
+    return TruncationStats(
+        pairs=sum(int(d.get("pairs", 0)) for d in counted),
+        truncated_pairs=sum(d["truncated_pairs"] for d in counted),
+        claims_affected=sum(d["truncated_pairs"] > 0 for d in counted),
+    )
 
 
 def binary_metrics(gold: list[str], pred: list[str]) -> BinaryMetrics:
@@ -304,12 +387,17 @@ def spans_overlap(a: EvidenceSpan, b: EvidenceSpan) -> bool:
     return a.chunk_id == b.chunk_id and a.start < b.end and b.start < a.end
 
 
-def evidence_agreement(predictions: list[Prediction], gold: list[GoldRecord]) -> EvidenceAgreement:
+def evidence_agreement(
+    predictions: list[Prediction], gold: list[GoldRecord], source: str | None = None
+) -> EvidenceAgreement:
+    """`source`: only gold labels whose evidence was chosen that way (EVIDENCE_SOURCES)."""
     by_id = {g.claim_id: g for g in gold}
     eligible = overlapping = 0
     for p in predictions:
         record = by_id[p.claim_id]
         if p.predicted != p.gold or p.gold == "unsupported" or not record.evidence:
+            continue
+        if source is not None and record.evidence_source != source:
             continue
         eligible += 1
         if p.evidence and any(spans_overlap(p.evidence, s) for s in record.evidence):
@@ -325,6 +413,7 @@ def build_report(
     wall_seconds: float,
     gold: list[GoldRecord],
     gold_path: Path,
+    gold_total: int | None = None,
 ) -> VerifierReport:
     golds = [p.gold for p in predictions]
     preds = [p.predicted for p in predictions]
@@ -332,6 +421,9 @@ def build_report(
     pairs = Counter(zip(golds, preds, strict=True))
     confusion = {g: {p: pairs.get((g, p), 0) for p in LABELS} for g in LABELS}
     local = bool(getattr(verifier, "local", True))
+    n = len(predictions)
+    strict = sum(p.gold == p.predicted and not p.parse_error for p in predictions)
+    strict_binary = sum(binary_correct(p) and not p.parse_error for p in predictions)
     return VerifierReport(
         verifier=verifier.name,
         identity=verifier.identity(),
@@ -345,9 +437,18 @@ def build_report(
         by_edge_case=group_metrics(predictions, lambda p: p.edge_case),
         by_company=group_metrics(predictions, lambda p: p.ticker),
         by_mode=group_metrics(predictions, lambda p: p.mode),
+        by_suggestion=group_metrics(predictions, lambda p: p.suggestion),
         latency=latency_metrics([p.latency_ms for p in predictions], wall_seconds),
         evidence_agreement=evidence_agreement(predictions, gold),
+        evidence_agreement_by_source={
+            source: evidence_agreement(predictions, gold, source) for source in EVIDENCE_SOURCES
+        },
         parse_errors=sum(p.parse_error for p in predictions),
+        accuracy_parse_errors_wrong=strict / n,
+        binary_accuracy_parse_errors_wrong=strict_binary / n,
+        truncation=truncation_stats(predictions),
+        claims_sha256=claims_sha256([p.claim_id for p in predictions]),
+        gold_total=gold_total,
         local=local,
         cost_per_1000_checks_usd=0.0 if local else None,
         gold_file=str(gold_path),
@@ -410,18 +511,24 @@ def evaluate_verifiers(
     results_dir: Path,
     prices: Prices,
     echo: Callable[[str], None] = print,
+    gold_total: int | None = None,
+    cooldown_seconds: float = 0.0,
+    sleep: Callable[[float], None] = time.sleep,
 ) -> EvalResults:
     """Run each verifier in turn (built, run, freed), write every output, return results."""
     results_dir = Path(results_dir)
     json_path = results_dir / "verifier_eval.json"
     results = load_results(json_path)
     output_tokens = None
-    for name in names:
+    for number, name in enumerate(names):
+        if number and cooldown_seconds > 0:
+            echo(f"cooling down {cooldown_seconds:g}s before {name}")
+            sleep(cooldown_seconds)
         echo(f"{name}: building")
         verifier = build(name)
         echo(f"{name}: verifying {len(gold)} claim(s)")
         predictions, wall = run_verifier(verifier, gold, echo)
-        report = build_report(verifier, predictions, wall, gold, gold_path)
+        report = build_report(verifier, predictions, wall, gold, gold_path, gold_total)
         results.verifiers[name] = report
         write_jsonl_atomic(
             [json.dumps(p.model_dump(), ensure_ascii=False) for p in predictions],
@@ -460,34 +567,51 @@ def _ms(value: float) -> str:
     return f"{value:,.0f}" if value >= 100 else f"{value:.1f}"
 
 
+def comparability_warnings(reports: list[VerifierReport]) -> list[str]:
+    """Why the rows may not be comparable: different gold files, or different claims
+    (a `--company` / `--limit` run next to a full one)."""
+    warnings = []
+    if len({r.gold_sha256 for r in reports}) > 1:
+        warnings.append(
+            "these rows were computed on different gold files (see `gold_sha256` in "
+            "verifier_eval.json). Re-run all verifiers before comparing them."
+        )
+    if len({(r.n, r.claims_sha256) for r in reports}) > 1:
+        sizes = ", ".join(f"{r.verifier} n={r.n}" for r in reports)
+        warnings.append(
+            f"these rows were computed on different sets of claims ({sizes}; see "
+            "`claims_sha256`). A `--company` or `--limit` run is not comparable with a "
+            "full run: re-run every verifier on the same claims."
+        )
+    return warnings
+
+
 def format_markdown(results: EvalResults) -> str:
     reports = list(results.verifiers.values())
     lines = ["# Verifier benchmark", ""]
     if not reports:
         return "\n".join([*lines, "No verifier has been evaluated yet.", ""])
-    shas = {r.gold_sha256 for r in reports}
     first = reports[0]
+    sizes = sorted({r.n for r in reports})
+    evaluated = f"{sizes[0]}" if len(sizes) == 1 else "a different number of"
     lines += [
-        f"Gold set: `{Path(first.gold_file).name}`, {first.n} confirmed claim(s) "
-        f"(sha256 `{first.gold_sha256[:12]}`).",
+        f"Gold set: `{Path(first.gold_file).name}` (sha256 `{first.gold_sha256[:12]}`); "
+        f"{evaluated} confirmed claim(s) evaluated per verifier (column n).",
         "",
     ]
-    if len(shas) > 1:
-        lines += [
-            "> **Warning:** these rows were computed on different gold files "
-            "(see `gold_sha256` in verifier_eval.json). Re-run all verifiers before "
-            "comparing them.",
-            "",
-        ]
+    for warning in comparability_warnings(reports):
+        lines += [f"> **Warning:** {warning}", ""]
     lines += [
-        "| Verifier | Model | Accuracy | Macro-F1 | Binary acc. | Latency p50 | Latency p95 "
+        "| Verifier | Model | n | Accuracy | Macro-F1 | Binary acc. | Latency p50 | Latency p95 "
         "| Throughput | Cost / 1,000 checks |",
-        "|---|---|---|---|---|---|---|---|---|",
+        "|---|---|---|---|---|---|---|---|---|---|",
     ]
     for r in reports:
         cost = "$0 (local)" if r.local else "n/a"
+        subset = f" of {r.gold_total}" if r.gold_total and r.gold_total != r.n else ""
         lines.append(
-            f"| {r.verifier} | `{r.identity.get('model', '')}` | {_pct(r.accuracy)} | "
+            f"| {r.verifier} | `{r.identity.get('model', '')}` | {r.n}{subset} | "
+            f"{_pct(r.accuracy)} | "
             f"{r.macro_f1:.3f} | {_pct(r.binary.accuracy)} | {_ms(r.latency.p50_ms)} ms | "
             f"{_ms(r.latency.p95_ms)} ms | {r.latency.throughput_per_s:.2f} checks/s | {cost} |"
         )
@@ -497,9 +621,28 @@ def format_markdown(results: EvalResults) -> str:
         'and unsupported into "not supported". MiniCheck and HHEM are binary models: '
         "they never predict contradicted (see docs/DESIGN.md), so their three-way scores "
         "count every gold-contradicted claim as an error; compare them on the binary "
-        "column. Latency is per claim (all retrieved passages), measured on this machine.",
+        "column, here and in every breakdown below. Latency is per claim (all retrieved "
+        "passages), measured on this machine.",
         "",
     ]
+    if any(r.parse_errors for r in reports):
+        lines += [
+            "Parse errors (no parseable JSON from the LLM) are scored as `unsupported`, "
+            "which is a free correct answer when the gold label is unsupported. With every "
+            "parse error counted as wrong instead:",
+            "",
+            "| Verifier | Parse errors | Accuracy | Binary acc. |",
+            "|---|---|---|---|",
+        ]
+        for r in reports:
+            if r.parse_errors:
+                lines.append(
+                    f"| {r.verifier} | {r.parse_errors} | "
+                    f"{_pct(r.accuracy_parse_errors_wrong)} (was {_pct(r.accuracy)}) | "
+                    f"{_pct(r.binary_accuracy_parse_errors_wrong)} "
+                    f"(was {_pct(r.binary.accuracy)}) |"
+                )
+        lines.append("")
     if results.hosted_cost_estimates:
         lines += [
             "### Hosted-model cost: ESTIMATE",
@@ -522,6 +665,10 @@ def format_markdown(results: EvalResults) -> str:
     return "\n".join(lines)
 
 
+def _agreement(ev: EvidenceAgreement) -> str:
+    return f"{ev.overlapping} of {ev.eligible} ({_pct(ev.rate)})"
+
+
 def _verifier_section(r: VerifierReport) -> list[str]:
     lines = [f"## {r.verifier}", "", f"Model: `{r.identity.get('model', '')}`. "]
     extras = {k: v for k, v in r.identity.items() if k not in {"verifier", "model"} and v}
@@ -530,12 +677,34 @@ def _verifier_section(r: VerifierReport) -> list[str]:
     if r.binary_model:
         lines[-1] += " Binary model: never predicts contradicted."
     if r.parse_errors:
-        lines[-1] += f" {r.parse_errors} claim(s) had no parseable JSON (counted unsupported)."
+        lines[-1] += (
+            f" {r.parse_errors} claim(s) had no parseable JSON (counted unsupported; "
+            f"accuracy with them counted as wrong: {_pct(r.accuracy_parse_errors_wrong)})."
+        )
+    if r.truncation is not None:
+        t = r.truncation
+        lines += [
+            "",
+            f"Truncation: {t.truncated_pairs} of {t.pairs} (chunk, claim) input(s) were "
+            f"longer than the model's token limit and lost the end of the chunk "
+            f"({t.claims_affected} of {r.n} claim(s) affected).",
+        ]
     ev = r.evidence_agreement
     lines += [
         "",
         f"Evidence agreement: {ev.overlapping} of {ev.eligible} correct supported/contradicted "
         f"verdicts cite a span overlapping the gold span ({_pct(ev.rate)}).",
+    ]
+    by_source = r.evidence_agreement_by_source
+    if by_source:
+        accepted, pasted = (by_source.get(k) for k in EVIDENCE_SOURCES)
+        lines.append(
+            f"By how the gold span was chosen: hand-pasted by the annotator "
+            f"{_agreement(pasted)}; one-key suggestion accepted {_agreement(accepted)}. The "
+            "suggestion uses the same lexical rule as the cross-encoder verifiers' span "
+            "picker, so only the hand-pasted figure is an independent measurement."
+        )
+    lines += [
         "",
         "| Label | Precision | Recall | F1 | Gold | Predicted |",
         "|---|---|---|---|---|---|",
@@ -554,10 +723,30 @@ def _verifier_section(r: VerifierReport) -> list[str]:
         ("edge-case tag", r.by_edge_case),
         ("company", r.by_company),
         ("generation mode", r.by_mode),
+        ("label suggestion shown to the annotator", r.by_suggestion),
+    )
+    three_way = (
+        "Accuracy (3-way; not meaningful for a binary model)"
+        if r.binary_model
+        else ("Accuracy (3-way)")
     )
     for title, groups in breakdowns:
-        lines += ["", f"By {title}:", "", f"| {title.capitalize()} | n | Accuracy |"]
-        lines.append("|---|---|---|")
-        lines += [f"| {k} | {g.n} | {_pct(g.accuracy)} |" for k, g in groups.items()]
+        if not groups:
+            continue
+        lines += ["", f"By {title}:", ""]
+        lines.append(f"| {title.capitalize()} | n | {three_way} | Binary acc. |")
+        lines.append("|---|---|---|---|")
+        lines += [
+            f"| {k} | {g.n} | {_pct(g.accuracy)} | {_pct(g.binary_accuracy)} |"
+            for k, g in groups.items()
+        ]
+    own = [k for k in r.by_suggestion if r.verifier in k.removeprefix("shown: ").split("+")]
+    if own and any(k.startswith("shown: ") for k in own):
+        lines += [
+            "",
+            f"> **Anchoring:** {sum(r.by_suggestion[k].n for k in own)} of these labels were "
+            f"made while {r.verifier}'s own suggestion was on screen; its score on that "
+            'row is inflated. Compare verifiers on the "not shown" row.',
+        ]
     lines.append("")
     return lines
