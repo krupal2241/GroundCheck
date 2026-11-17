@@ -63,6 +63,7 @@ from groundcheck.verify.costs import CostEstimate, Prices, approx_tokens, estima
 DEFAULT_RESULTS_DIR = REPO_ROOT / "results"
 NO_TAG = "(none)"
 NOT_SHOWN = "not shown"
+COOLDOWN_EVERY = 25  # claims between two cooldown pauses (--cooldown-seconds)
 EVIDENCE_SOURCES = ("suggestion_accepted", "hand_pasted")
 BINARY_VERIFIERS = ("minicheck", "hhem")
 
@@ -171,11 +172,25 @@ def run_verifier(
     gold: list[GoldRecord],
     echo: Callable[[str], None] = print,
     progress_every: int = 25,
+    cooldown_seconds: float = 0.0,
+    cooldown_every: int = COOLDOWN_EVERY,
+    sleep: Callable[[float], None] | None = None,
 ) -> tuple[list[Prediction], float]:
-    """Verify every gold claim against its passages. Returns predictions and wall seconds."""
+    """Verify every gold claim against its passages. Returns predictions and wall seconds.
+
+    With `cooldown_seconds`, it pauses that long after every `cooldown_every` claims so a
+    fanless laptop can shed heat. The pauses are outside every check, so per-claim
+    latency is unaffected, and they are subtracted from the wall time, so throughput
+    is too."""
     predictions = []
+    sleep = sleep or time.sleep
     started = time.perf_counter()
+    paused = 0.0
     for number, record in enumerate(gold, start=1):
+        if cooldown_seconds > 0 and number > 1 and (number - 1) % cooldown_every == 0:
+            pause_started = time.perf_counter()
+            sleep(cooldown_seconds)
+            paused += time.perf_counter() - pause_started
         result = verifier.verify(record.claim, record.chunks)
         predictions.append(
             Prediction(
@@ -197,7 +212,7 @@ def run_verifier(
         )
         if progress_every and number % progress_every == 0:
             echo(f"  {verifier.name}: {number}/{len(gold)}")
-    return predictions, time.perf_counter() - started
+    return predictions, time.perf_counter() - started - paused
 
 
 def _small(details: dict[str, Any]) -> dict[str, Any]:
@@ -513,7 +528,7 @@ def evaluate_verifiers(
     echo: Callable[[str], None] = print,
     gold_total: int | None = None,
     cooldown_seconds: float = 0.0,
-    sleep: Callable[[float], None] = time.sleep,
+    sleep: Callable[[float], None] | None = None,
 ) -> EvalResults:
     """Run each verifier in turn (built, run, freed), write every output, return results."""
     results_dir = Path(results_dir)
@@ -523,11 +538,13 @@ def evaluate_verifiers(
     for number, name in enumerate(names):
         if number and cooldown_seconds > 0:
             echo(f"cooling down {cooldown_seconds:g}s before {name}")
-            sleep(cooldown_seconds)
+            (sleep or time.sleep)(cooldown_seconds)
         echo(f"{name}: building")
         verifier = build(name)
         echo(f"{name}: verifying {len(gold)} claim(s)")
-        predictions, wall = run_verifier(verifier, gold, echo)
+        predictions, wall = run_verifier(
+            verifier, gold, echo, cooldown_seconds=cooldown_seconds, sleep=sleep
+        )
         report = build_report(verifier, predictions, wall, gold, gold_path, gold_total)
         results.verifiers[name] = report
         write_jsonl_atomic(

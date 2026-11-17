@@ -69,6 +69,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="pause between batches (lets a fanless laptop cool down)",
     )
     parser.add_argument(
+        "--cooldown-seconds",
+        type=float,
+        default=0.0,
+        metavar="SECONDS",
+        help="the same pause under the name `groundcheck index` and `eval-verifiers` use "
+        "(default 0; the larger of the two options wins). On a fanless laptop try 60 "
+        "with --batch-size 5",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="use the FakeProvider (no model) and write under data/cache/dry-run/",
@@ -124,6 +133,8 @@ def build_parser() -> argparse.ArgumentParser:
 def _run(args: argparse.Namespace) -> int:
     if args.batch_size < 1 or (args.limit is not None and args.limit < 0):
         raise ConfigError("--batch-size must be at least 1 and --limit non-negative")
+    if args.cooldown_seconds < 0 or args.sleep_between_batches < 0:
+        raise ConfigError("--cooldown-seconds and --sleep-between-batches must not be negative")
     companies = load_companies(args.config)
     llm_config = load_llm_config(args.llm_config)
     if args.top_k is not None:
@@ -231,7 +242,7 @@ def _run(args: argparse.Namespace) -> int:
         out_dir,
         batch_size=args.batch_size,
         limit=args.limit,
-        sleep_between_batches=args.sleep_between_batches,
+        sleep_between_batches=max(args.sleep_between_batches, args.cooldown_seconds),
     )
     print(
         f"Wrote {summary.written} candidate(s) with {summary.claims} claim(s); "
